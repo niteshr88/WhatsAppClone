@@ -7,5 +7,8 @@
 
 frontend/node_modules/
 frontend/dist/
+frontend/.env
+frontend/*.tsbuildinfo
 
 service/**/App_Data/
+service/**/wwwroot/uploads/
