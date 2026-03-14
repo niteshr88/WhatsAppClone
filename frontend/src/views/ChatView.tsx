@@ -1,0 +1,1762 @@
+import {
+  ChangeEvent,
+  FormEvent,
+  useEffect,
+  useEffectEvent,
+  useMemo,
+  useRef,
+  useState,
+  useTransition
+} from "react";
+import type { HubConnection } from "@microsoft/signalr";
+import { useSearchParams } from "react-router-dom";
+import {
+  acceptFriendRequest,
+  HubConnectionState,
+  declineFriendRequest,
+  createChatConnection,
+  createConversation,
+  createMessage,
+  deleteMessage,
+  getConversations,
+  getCurrentUser,
+  getMessages,
+  getWebPushPublicKey,
+  getUsers,
+  markConversationRead,
+  saveWebPushSubscription,
+  sendFriendRequest,
+  uploadMessageMedia,
+  updateMessage,
+  updateCurrentUser
+} from "../api";
+import type {
+  AuthUser,
+  Conversation,
+  FriendshipStatus,
+  Message,
+  MessageReceipt,
+  Session,
+  UpdateProfileRequest
+} from "../types";
+import {
+  getMessagePreviewText,
+  sortConversations,
+  updateConversationPreview,
+  upsertConversation,
+  type MessagesByConversation
+} from "../utils/chat";
+import {
+  ensureBrowserPushSubscription,
+  getBrowserNotificationPermission,
+  requestBrowserNotificationPermission,
+  showChatNotification,
+  type BrowserNotificationPermission
+} from "../utils/notifications";
+import { deletePendingMediaBlob, getPendingMediaBlob, savePendingMediaBlob } from "../utils/pendingMedia";
+import ChatPanel from "./chat/ChatPanel";
+import PeopleSidebar from "./chat/PeopleSidebar";
+import ProfileSidebar from "./chat/ProfileSidebar";
+import SidebarRail from "./chat/SidebarRail";
+
+type ChatViewProps = {
+  session: Session;
+  onSessionChange: (session: Session | null) => void;
+};
+
+type PresenceChangedPayload = {
+  userId: string;
+  isOnline: boolean;
+};
+
+type FriendshipChangedPayload = {
+  userId: string;
+  friendshipStatus: FriendshipStatus;
+  friendshipRequestId?: number | null;
+};
+
+type TypingPayload = {
+  conversationId: number;
+  userId: string;
+  displayName?: string;
+};
+
+type PendingOutgoingTextMessage = {
+  tempId: number;
+  clientMessageId: string;
+  conversationId: number;
+  text: string;
+  createdAt: string;
+  status: "sending" | "failed";
+};
+
+type PendingOutgoingMediaMessage = {
+  tempId: number;
+  clientMessageId: string;
+  conversationId: number;
+  fileName: string;
+  contentType: string;
+  fileSize: number;
+  createdAt: string;
+  status: "sending" | "failed";
+  previewUrl?: string | null;
+};
+
+const NOTIFICATION_PROMPT_STORAGE_KEY = "pulsechat.notifications.prompted";
+
+function getPendingQueueStorageKey(userId: string) {
+  return `pulsechat.pending.${userId}`;
+}
+
+function getPendingMediaQueueStorageKey(userId: string) {
+  return `pulsechat.pending-media.${userId}`;
+}
+
+function loadPendingOutgoingQueue(userId: string): PendingOutgoingTextMessage[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(getPendingQueueStorageKey(userId));
+
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as PendingOutgoingTextMessage[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function loadPendingOutgoingMediaQueue(userId: string): PendingOutgoingMediaMessage[] {
+  if (typeof window === "undefined") {
+    return [];
+  }
+
+  try {
+    const raw = window.localStorage.getItem(getPendingMediaQueueStorageKey(userId));
+
+    if (!raw) {
+      return [];
+    }
+
+    const parsed = JSON.parse(raw) as PendingOutgoingMediaMessage[];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function serializePendingMediaQueue(queue: PendingOutgoingMediaMessage[]) {
+  return queue.map(({ previewUrl: _previewUrl, ...queuedMessage }) => queuedMessage);
+}
+
+function createProfileForm(user: AuthUser): UpdateProfileRequest {
+  return {
+    displayName: user.displayName,
+    profileImageUrl: user.profileImageUrl ?? "",
+    bio: user.bio ?? ""
+  };
+}
+
+function ChatView({ session, onSessionChange }: ChatViewProps) {
+  const [searchParams] = useSearchParams();
+  const [currentUser, setCurrentUser] = useState<AuthUser>(session.user);
+  const [contacts, setContacts] = useState<AuthUser[]>([]);
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
+  const [messagesByConversation, setMessagesByConversation] = useState<MessagesByConversation>({});
+  const [search, setSearch] = useState("");
+  const [debouncedSearch, setDebouncedSearch] = useState("");
+  const [draft, setDraft] = useState("");
+  const [status, setStatus] = useState("Loading workspace...");
+  const [workspaceError, setWorkspaceError] = useState("");
+  const [notificationPermission, setNotificationPermission] = useState<BrowserNotificationPermission>(() =>
+    getBrowserNotificationPermission()
+  );
+  const [pendingOutgoingQueue, setPendingOutgoingQueue] = useState<PendingOutgoingTextMessage[]>(() =>
+    loadPendingOutgoingQueue(session.user.id)
+  );
+  const [pendingOutgoingMediaQueue, setPendingOutgoingMediaQueue] = useState<PendingOutgoingMediaMessage[]>(() =>
+    loadPendingOutgoingMediaQueue(session.user.id)
+  );
+  const [connectionState, setConnectionState] = useState("offline");
+  const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
+  const [typingByConversation, setTypingByConversation] = useState<Record<number, { userId: string; displayName: string }>>({});
+  const [unreadCounts, setUnreadCounts] = useState<Record<number, number>>({});
+  const [sidebarView, setSidebarView] = useState<"friends" | "requests" | "discover" | "profile">("friends");
+  const [isEditingProfile, setIsEditingProfile] = useState(false);
+  const [profileForm, setProfileForm] = useState<UpdateProfileRequest>(() => createProfileForm(session.user));
+  const [profileError, setProfileError] = useState("");
+  const [profileStatus, setProfileStatus] = useState("");
+  const [isSending, startSendTransition] = useTransition();
+  const [isUploadingMedia, startUploadTransition] = useTransition();
+  const [isSavingProfile, startProfileTransition] = useTransition();
+  const connectionRef = useRef<HubConnection | null>(null);
+  const joinedConversationIdsRef = useRef<Set<number>>(new Set());
+  const messageStreamRef = useRef<HTMLDivElement | null>(null);
+  const conversationsRef = useRef<Conversation[]>([]);
+  const pendingOutgoingQueueRef = useRef<PendingOutgoingTextMessage[]>(pendingOutgoingQueue);
+  const pendingOutgoingMediaQueueRef = useRef<PendingOutgoingMediaMessage[]>(pendingOutgoingMediaQueue);
+  const nextTempMessageIdRef = useRef(
+    [...pendingOutgoingQueue, ...pendingOutgoingMediaQueue].length
+      ? Math.min(...[...pendingOutgoingQueue, ...pendingOutgoingMediaQueue].map((item) => item.tempId)) - 1
+      : -1
+  );
+  const outgoingTypingConversationIdRef = useRef<number | null>(null);
+  const outgoingTypingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const incomingTypingTimeoutsRef = useRef<Record<number, ReturnType<typeof setTimeout>>>({});
+  const requestedConversationId = Number(searchParams.get("conversationId") ?? "") || null;
+
+  const activeConversation = useMemo(
+    () => conversations.find((conversation) => conversation.id === activeConversationId) ?? null,
+    [activeConversationId, conversations]
+  );
+  const visibleContacts = useMemo(() => {
+    const filter = debouncedSearch.trim().toLowerCase();
+    const filteredContacts = !filter
+      ? contacts
+      : contacts.filter((contact) => `${contact.displayName} ${contact.email}`.toLowerCase().includes(filter));
+
+    return [...filteredContacts].sort((left, right) => {
+      const statusPriority: Record<FriendshipStatus, number> = {
+        incoming: 0,
+        friends: 1,
+        outgoing: 2,
+        none: 3
+      };
+
+      const leftPriority = statusPriority[left.friendshipStatus ?? "none"];
+      const rightPriority = statusPriority[right.friendshipStatus ?? "none"];
+
+      if (leftPriority !== rightPriority) {
+        return leftPriority - rightPriority;
+      }
+
+      return left.displayName.localeCompare(right.displayName);
+    });
+  }, [contacts, debouncedSearch]);
+  const incomingRequestContacts = useMemo(
+    () => visibleContacts.filter((contact) => contact.friendshipStatus === "incoming"),
+    [visibleContacts]
+  );
+  const friendContacts = useMemo(
+    () => visibleContacts.filter((contact) => contact.friendshipStatus === "friends"),
+    [visibleContacts]
+  );
+  const discoverContacts = useMemo(
+    () => visibleContacts.filter((contact) => contact.friendshipStatus !== "incoming" && contact.friendshipStatus !== "friends"),
+    [visibleContacts]
+  );
+  const conversationByUserId = useMemo(() => {
+    const lookup = new Map<string, Conversation>();
+
+    for (const conversation of conversations) {
+      if (conversation.isGroup) {
+        continue;
+      }
+
+      const otherParticipant = conversation.participants.find((participant) => participant.id !== currentUser.id);
+
+      if (otherParticipant) {
+        lookup.set(otherParticipant.id, conversation);
+      }
+    }
+
+    return lookup;
+  }, [conversations, currentUser.id]);
+  const messages = activeConversationId ? messagesByConversation[activeConversationId] ?? [] : [];
+  const activeTypingIndicator = useMemo(
+    () => (activeConversationId ? typingByConversation[activeConversationId] ?? null : null),
+    [activeConversationId, typingByConversation]
+  );
+  const activeDirectContact = useMemo(() => {
+    if (!activeConversation || activeConversation.isGroup) {
+      return null;
+    }
+
+    const otherParticipant = activeConversation.participants.find((participant) => participant.id !== currentUser.id);
+
+    if (!otherParticipant) {
+      return null;
+    }
+
+    return contacts.find((contact) => contact.id === otherParticipant.id) ?? null;
+  }, [activeConversation, contacts, currentUser.id]);
+  const activeConversationPresence = useMemo(() => {
+    if (!activeConversation) {
+      return {
+        isOnline: false,
+        subtitle: "Choose someone from the sidebar to start."
+      };
+    }
+
+    if (activeConversation.isGroup) {
+      const onlineCount = activeConversation.participants.filter(
+        (participant) => participant.id !== currentUser.id && onlineUserIds.has(participant.id)
+      ).length;
+
+      return {
+        isOnline: onlineCount > 0,
+        subtitle: activeTypingIndicator
+          ? `${activeTypingIndicator.displayName} is typing...`
+          : onlineCount
+            ? `${onlineCount} online`
+            : `${activeConversation.participants.length} participant${activeConversation.participants.length > 1 ? "s" : ""}`
+      };
+    }
+
+    const otherParticipant = activeConversation.participants.find((participant) => participant.id !== currentUser.id);
+    const isOnline = otherParticipant ? onlineUserIds.has(otherParticipant.id) : false;
+
+    return {
+      isOnline,
+      subtitle: activeTypingIndicator
+        ? `${activeTypingIndicator.displayName} is typing...`
+        : isOnline
+          ? "Online now"
+          : "Offline"
+    };
+  }, [activeConversation, activeTypingIndicator, currentUser.id, onlineUserIds]);
+
+  useEffect(() => {
+    conversationsRef.current = conversations;
+  }, [conversations]);
+
+  useEffect(() => {
+    pendingOutgoingQueueRef.current = pendingOutgoingQueue;
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (pendingOutgoingQueue.length) {
+      window.localStorage.setItem(getPendingQueueStorageKey(session.user.id), JSON.stringify(pendingOutgoingQueue));
+    } else {
+      window.localStorage.removeItem(getPendingQueueStorageKey(session.user.id));
+    }
+  }, [pendingOutgoingQueue, session.user.id]);
+
+  useEffect(() => {
+    pendingOutgoingMediaQueueRef.current = pendingOutgoingMediaQueue;
+
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (pendingOutgoingMediaQueue.length) {
+      window.localStorage.setItem(
+        getPendingMediaQueueStorageKey(session.user.id),
+        JSON.stringify(serializePendingMediaQueue(pendingOutgoingMediaQueue))
+      );
+    } else {
+      window.localStorage.removeItem(getPendingMediaQueueStorageKey(session.user.id));
+    }
+  }, [pendingOutgoingMediaQueue, session.user.id]);
+
+  useEffect(() => {
+    const timeout = setTimeout(() => {
+      setDebouncedSearch(search);
+    }, 240);
+
+    return () => {
+      clearTimeout(timeout);
+    };
+  }, [search]);
+
+  useEffect(() => {
+    setProfileForm(createProfileForm(currentUser));
+  }, [currentUser]);
+
+  useEffect(() => {
+    setNotificationPermission(getBrowserNotificationPermission());
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    if (notificationPermission !== "default") {
+      return;
+    }
+
+    if (window.localStorage.getItem(NOTIFICATION_PROMPT_STORAGE_KEY) === "1") {
+      return;
+    }
+
+    window.localStorage.setItem(NOTIFICATION_PROMPT_STORAGE_KEY, "1");
+
+    void requestBrowserNotificationPermission().then((permission) => {
+      setNotificationPermission(permission);
+
+      if (permission === "granted") {
+        setStatus("Notifications enabled.");
+      }
+    });
+  }, [notificationPermission]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    async function syncWebPushSubscription() {
+      if (notificationPermission !== "granted") {
+        return;
+      }
+
+      try {
+        const { publicKey } = await getWebPushPublicKey(session.token);
+        const subscription = await ensureBrowserPushSubscription(publicKey);
+
+        if (!subscription || disposed) {
+          return;
+        }
+
+        await saveWebPushSubscription(session.token, subscription);
+      } catch (caughtError) {
+        if (!disposed) {
+          setWorkspaceError(
+            caughtError instanceof Error ? caughtError.message : "Unable to enable push notifications."
+          );
+        }
+      }
+    }
+
+    void syncWebPushSubscription();
+
+    return () => {
+      disposed = true;
+    };
+  }, [notificationPermission, session.token]);
+
+  const refreshContacts = useEffectEvent(async () => {
+    const nextContacts = await getUsers(session.token);
+    setContacts(nextContacts);
+  });
+
+  const createPendingTextMessage = useEffectEvent((queuedMessage: PendingOutgoingTextMessage): Message => ({
+    id: queuedMessage.tempId,
+    conversationId: queuedMessage.conversationId,
+    senderId: currentUser.id,
+    clientMessageId: queuedMessage.clientMessageId,
+    senderDisplayName: currentUser.displayName,
+    text: queuedMessage.text,
+    sentAt: queuedMessage.createdAt,
+    localStatus: queuedMessage.status,
+    editedAt: null,
+    deletedAt: null,
+    deliveredAt: null,
+    readAt: null
+  }));
+
+  const createPendingMediaMessage = useEffectEvent((queuedMessage: PendingOutgoingMediaMessage): Message => ({
+    id: queuedMessage.tempId,
+    conversationId: queuedMessage.conversationId,
+    senderId: currentUser.id,
+    clientMessageId: queuedMessage.clientMessageId,
+    senderDisplayName: currentUser.displayName,
+    text: "",
+    mediaUrl: queuedMessage.previewUrl ?? "",
+    mediaContentType: queuedMessage.contentType,
+    mediaFileName: queuedMessage.fileName,
+    mediaFileSize: queuedMessage.fileSize,
+    sentAt: queuedMessage.createdAt,
+    localStatus: queuedMessage.status,
+    editedAt: null,
+    deletedAt: null,
+    deliveredAt: null,
+    readAt: null
+  }));
+
+  const mergeIncomingMessage = useEffectEvent((message: Message) => {
+    const normalizedMessage: Message = {
+      ...message,
+      localStatus: null
+    };
+
+    setMessagesByConversation((current) => {
+      const existing = current[message.conversationId] ?? [];
+      const matchedIndex = existing.findIndex(
+        (entry) =>
+          entry.id === message.id ||
+          (!!normalizedMessage.clientMessageId && entry.clientMessageId === normalizedMessage.clientMessageId)
+      );
+
+      if (matchedIndex >= 0) {
+        const currentMessage = existing[matchedIndex];
+        const nextConversationMessages = [...existing];
+        nextConversationMessages[matchedIndex] = {
+          ...currentMessage,
+          ...normalizedMessage,
+          localStatus: null
+        };
+
+        return {
+          ...current,
+          [message.conversationId]: nextConversationMessages
+        };
+      }
+
+      return {
+        ...current,
+        [message.conversationId]: [...existing, normalizedMessage]
+      };
+    });
+    if (normalizedMessage.clientMessageId && !normalizedMessage.localStatus) {
+      setPendingOutgoingQueue((current) =>
+        current.filter((queuedMessage) => queuedMessage.clientMessageId !== normalizedMessage.clientMessageId)
+      );
+      setPendingOutgoingMediaQueue((current) =>
+        current.filter((queuedMessage) => queuedMessage.clientMessageId !== normalizedMessage.clientMessageId)
+      );
+      void deletePendingMediaBlob(normalizedMessage.clientMessageId).catch(() => undefined);
+    }
+    setConversations((current) => updateConversationPreview(current, normalizedMessage));
+
+    if (normalizedMessage.senderId !== currentUser.id && normalizedMessage.conversationId !== activeConversationId) {
+      setUnreadCounts((current) => ({
+        ...current,
+        [normalizedMessage.conversationId]: (current[normalizedMessage.conversationId] ?? 0) + 1
+      }));
+    }
+  });
+
+  const syncPendingQueueMessages = useEffectEvent((queue: PendingOutgoingTextMessage[]) => {
+    if (queue.length === 0) {
+      return;
+    }
+
+    setMessagesByConversation((current) => {
+      let didChange = false;
+      const next: MessagesByConversation = { ...current };
+
+      for (const queuedMessage of queue) {
+        const pendingMessage = createPendingTextMessage(queuedMessage);
+        const existing = next[queuedMessage.conversationId] ?? current[queuedMessage.conversationId] ?? [];
+        const matchedIndex = existing.findIndex((message) => message.clientMessageId === queuedMessage.clientMessageId);
+
+        if (matchedIndex >= 0) {
+          const matchedMessage = existing[matchedIndex];
+
+          if (matchedMessage.id > 0 && !matchedMessage.localStatus) {
+            continue;
+          }
+
+          const updatedConversationMessages = [...existing];
+          updatedConversationMessages[matchedIndex] = {
+            ...matchedMessage,
+            ...pendingMessage
+          };
+          next[queuedMessage.conversationId] = updatedConversationMessages;
+          didChange = true;
+          continue;
+        }
+
+        next[queuedMessage.conversationId] = [...existing, pendingMessage];
+        didChange = true;
+      }
+
+      return didChange ? next : current;
+    });
+
+    setConversations((current) =>
+      queue.reduce((nextConversations, queuedMessage) => updateConversationPreview(nextConversations, createPendingTextMessage(queuedMessage)), current)
+    );
+  });
+
+  const syncPendingMediaQueueMessages = useEffectEvent((queue: PendingOutgoingMediaMessage[]) => {
+    if (queue.length === 0) {
+      return;
+    }
+
+    setMessagesByConversation((current) => {
+      let didChange = false;
+      const next: MessagesByConversation = { ...current };
+
+      for (const queuedMessage of queue) {
+        const pendingMessage = createPendingMediaMessage(queuedMessage);
+        const existing = next[queuedMessage.conversationId] ?? current[queuedMessage.conversationId] ?? [];
+        const matchedIndex = existing.findIndex((message) => message.clientMessageId === queuedMessage.clientMessageId);
+
+        if (matchedIndex >= 0) {
+          const matchedMessage = existing[matchedIndex];
+
+          if (matchedMessage.id > 0 && !matchedMessage.localStatus) {
+            continue;
+          }
+
+          const updatedConversationMessages = [...existing];
+          updatedConversationMessages[matchedIndex] = {
+            ...matchedMessage,
+            ...pendingMessage
+          };
+          next[queuedMessage.conversationId] = updatedConversationMessages;
+          didChange = true;
+          continue;
+        }
+
+        next[queuedMessage.conversationId] = [...existing, pendingMessage];
+        didChange = true;
+      }
+
+      return didChange ? next : current;
+    });
+
+    setConversations((current) =>
+      queue.reduce((nextConversations, queuedMessage) => updateConversationPreview(nextConversations, createPendingMediaMessage(queuedMessage)), current)
+    );
+  });
+
+  const updatePendingQueueItemStatus = useEffectEvent((clientMessageId: string, status: PendingOutgoingTextMessage["status"]) => {
+    setPendingOutgoingQueue((current) =>
+      current.map((queuedMessage) =>
+        queuedMessage.clientMessageId === clientMessageId
+          ? {
+              ...queuedMessage,
+              status
+            }
+          : queuedMessage
+      )
+    );
+    setMessagesByConversation((current) => {
+      let didChange = false;
+      const next: MessagesByConversation = { ...current };
+
+      for (const [conversationIdKey, conversationMessages] of Object.entries(current)) {
+        const updatedConversationMessages = conversationMessages.map((message) => {
+          if (message.clientMessageId !== clientMessageId) {
+            return message;
+          }
+
+          didChange = true;
+          return {
+            ...message,
+            localStatus: status
+          };
+        });
+
+        next[Number(conversationIdKey)] = updatedConversationMessages;
+      }
+
+      return didChange ? next : current;
+    });
+  });
+
+  const updatePendingMediaQueueItemStatus = useEffectEvent(
+    (clientMessageId: string, status: PendingOutgoingMediaMessage["status"], previewUrl?: string | null) => {
+      setPendingOutgoingMediaQueue((current) =>
+        current.map((queuedMessage) =>
+          queuedMessage.clientMessageId === clientMessageId
+            ? {
+                ...queuedMessage,
+                status,
+                previewUrl: previewUrl ?? queuedMessage.previewUrl
+              }
+            : queuedMessage
+        )
+      );
+      setMessagesByConversation((current) => {
+        let didChange = false;
+        const next: MessagesByConversation = { ...current };
+
+        for (const [conversationIdKey, conversationMessages] of Object.entries(current)) {
+          const updatedConversationMessages = conversationMessages.map((message) => {
+            if (message.clientMessageId !== clientMessageId) {
+              return message;
+            }
+
+            didChange = true;
+            return {
+              ...message,
+              mediaUrl: previewUrl ?? message.mediaUrl,
+              localStatus: status
+            };
+          });
+
+          next[Number(conversationIdKey)] = updatedConversationMessages;
+        }
+
+        return didChange ? next : current;
+      });
+    }
+  );
+
+  const applyReceiptUpdates = useEffectEvent((receipts: MessageReceipt[]) => {
+    if (receipts.length === 0) {
+      return;
+    }
+
+    setMessagesByConversation((current) => {
+      let didChange = false;
+      const receiptLookup = new Map(receipts.map((receipt) => [receipt.id, receipt]));
+      const next: MessagesByConversation = { ...current };
+
+      for (const [conversationIdKey, conversationMessages] of Object.entries(current)) {
+        const conversationId = Number(conversationIdKey);
+        const updatedMessages = conversationMessages.map((message) => {
+          const receipt = receiptLookup.get(message.id);
+
+          if (!receipt || receipt.conversationId !== conversationId) {
+            return message;
+          }
+
+          didChange = true;
+
+          return {
+            ...message,
+            deliveredAt: receipt.deliveredAt ?? null,
+            readAt: receipt.readAt ?? null
+          };
+        });
+
+        next[conversationId] = updatedMessages;
+      }
+
+      return didChange ? next : current;
+    });
+  });
+
+  const applyMessagePatch = useEffectEvent((nextMessage: Message) => {
+    let shouldUpdatePreview = false;
+
+    setMessagesByConversation((current) => {
+      const existing = current[nextMessage.conversationId] ?? [];
+      const matchedIndex = existing.findIndex(
+        (message) => message.id === nextMessage.id || (!!nextMessage.clientMessageId && message.clientMessageId === nextMessage.clientMessageId)
+      );
+
+      if (matchedIndex < 0) {
+        return current;
+      }
+
+      shouldUpdatePreview = existing[existing.length - 1]?.id === existing[matchedIndex]?.id;
+
+      return {
+        ...current,
+        [nextMessage.conversationId]: existing.map((message, index) =>
+          index === matchedIndex
+            ? {
+                ...message,
+                ...nextMessage,
+                localStatus: null
+              }
+            : message
+        )
+      };
+    });
+
+    if (nextMessage.clientMessageId) {
+      setPendingOutgoingQueue((current) =>
+        current.filter((queuedMessage) => queuedMessage.clientMessageId !== nextMessage.clientMessageId)
+      );
+      setPendingOutgoingMediaQueue((current) =>
+        current.filter((queuedMessage) => queuedMessage.clientMessageId !== nextMessage.clientMessageId)
+      );
+      void deletePendingMediaBlob(nextMessage.clientMessageId).catch(() => undefined);
+    }
+
+    if (shouldUpdatePreview) {
+      setConversations((current) =>
+        current.map((conversation) =>
+          conversation.id === nextMessage.conversationId
+            ? {
+                ...conversation,
+                lastMessageText: getMessagePreviewText(nextMessage),
+                lastMessageAt: nextMessage.sentAt
+              }
+            : conversation
+        )
+      );
+    }
+  });
+
+  const stopTypingSignal = useEffectEvent(async (conversationId: number) => {
+    const connection = connectionRef.current;
+
+    if (!connection || connection.state !== HubConnectionState.Connected) {
+      return;
+    }
+
+    await connection.invoke("StopTyping", conversationId.toString()).catch(() => undefined);
+  });
+
+  const clearOutgoingTyping = useEffectEvent((conversationId?: number | null) => {
+    if (outgoingTypingTimeoutRef.current) {
+      clearTimeout(outgoingTypingTimeoutRef.current);
+      outgoingTypingTimeoutRef.current = null;
+    }
+
+    const targetConversationId = conversationId ?? outgoingTypingConversationIdRef.current;
+
+    if (!targetConversationId) {
+      outgoingTypingConversationIdRef.current = null;
+      return;
+    }
+
+    outgoingTypingConversationIdRef.current = null;
+    void stopTypingSignal(targetConversationId);
+  });
+
+  const refreshIncomingTypingTimeout = useEffectEvent((conversationId: number) => {
+    const currentTimeout = incomingTypingTimeoutsRef.current[conversationId];
+
+    if (currentTimeout) {
+      clearTimeout(currentTimeout);
+    }
+
+    incomingTypingTimeoutsRef.current[conversationId] = setTimeout(() => {
+      delete incomingTypingTimeoutsRef.current[conversationId];
+      setTypingByConversation((current) => {
+        if (!current[conversationId]) {
+          return current;
+        }
+
+        const next = { ...current };
+        delete next[conversationId];
+        return next;
+      });
+    }, 2200);
+  });
+
+  const clearIncomingTyping = useEffectEvent((conversationId: number, userId?: string) => {
+    const currentTimeout = incomingTypingTimeoutsRef.current[conversationId];
+
+    if (currentTimeout) {
+      clearTimeout(currentTimeout);
+      delete incomingTypingTimeoutsRef.current[conversationId];
+    }
+
+    setTypingByConversation((current) => {
+      const currentTyping = current[conversationId];
+
+      if (!currentTyping || (userId && currentTyping.userId !== userId)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+  });
+
+  const handleDraftChange = useEffectEvent((value: string) => {
+    setDraft(value);
+
+    const activeId = activeConversationId;
+    const connection = connectionRef.current;
+    const trimmedValue = value.trim();
+
+    if (!activeId || !connection || connection.state !== HubConnectionState.Connected) {
+      if (!trimmedValue) {
+        clearOutgoingTyping();
+      }
+
+      return;
+    }
+
+    if (!trimmedValue) {
+      if (outgoingTypingConversationIdRef.current === activeId) {
+        clearOutgoingTyping(activeId);
+      }
+
+      return;
+    }
+
+    const currentTypingConversationId = outgoingTypingConversationIdRef.current;
+
+    if (currentTypingConversationId !== activeId) {
+      if (currentTypingConversationId) {
+        void stopTypingSignal(currentTypingConversationId);
+      }
+
+      outgoingTypingConversationIdRef.current = activeId;
+      void connection.invoke("StartTyping", activeId.toString()).catch(() => undefined);
+    }
+
+    if (outgoingTypingTimeoutRef.current) {
+      clearTimeout(outgoingTypingTimeoutRef.current);
+    }
+
+    outgoingTypingTimeoutRef.current = setTimeout(() => {
+      const typingConversationId = outgoingTypingConversationIdRef.current;
+
+      if (!typingConversationId) {
+        return;
+      }
+
+      outgoingTypingConversationIdRef.current = null;
+      void stopTypingSignal(typingConversationId);
+    }, 1200);
+  });
+
+  const acknowledgeConversationRead = useEffectEvent(async (conversationId: number, conversationMessages?: Message[]) => {
+    const nextConversationMessages = conversationMessages ?? messagesByConversation[conversationId] ?? [];
+    const hasUnreadIncomingMessages = nextConversationMessages.some(
+      (message) => message.senderId !== currentUser.id && !message.readAt
+    );
+
+    if (!hasUnreadIncomingMessages) {
+      return;
+    }
+
+    try {
+      const connection = connectionRef.current;
+
+      if (connection && connection.state === HubConnectionState.Connected) {
+        await connection.invoke("MarkConversationRead", conversationId.toString());
+      } else {
+        await markConversationRead(session.token, conversationId);
+      }
+    } catch {
+      // Receipt updates are opportunistic; message rendering still works without them.
+    }
+  });
+
+  const handleIncomingMessage = useEffectEvent((message: Message) => {
+    mergeIncomingMessage(message);
+    clearIncomingTyping(message.conversationId, message.senderId);
+
+    if (
+      message.senderId !== currentUser.id &&
+      (document.hidden || message.conversationId !== activeConversationId) &&
+      notificationPermission === "granted"
+    ) {
+      const conversation = conversationsRef.current.find((entry) => entry.id === message.conversationId);
+      const otherParticipant = conversation?.participants.find((participant) => participant.id !== currentUser.id);
+      const title = conversation?.displayName ?? message.senderDisplayName;
+      const body = getMessagePreviewText(message) || "New message";
+      void showChatNotification({
+        title,
+        body,
+        conversationId: message.conversationId,
+        icon: otherParticipant?.profileImageUrl ?? null
+      });
+    }
+
+    if (message.senderId !== currentUser.id && message.conversationId === activeConversationId) {
+      void acknowledgeConversationRead(message.conversationId, [
+        ...(messagesByConversation[message.conversationId] ?? []),
+        message
+      ]);
+    }
+  });
+
+  const sendQueuedTextMessage = useEffectEvent(async (queuedMessage: PendingOutgoingTextMessage) => {
+    updatePendingQueueItemStatus(queuedMessage.clientMessageId, "sending");
+    const confirmedMessage = await createMessage(
+      session.token,
+      queuedMessage.conversationId,
+      queuedMessage.text,
+      queuedMessage.clientMessageId
+    );
+    mergeIncomingMessage(confirmedMessage);
+  });
+
+  const sendQueuedMediaMessage = useEffectEvent(async (queuedMessage: PendingOutgoingMediaMessage) => {
+    updatePendingMediaQueueItemStatus(queuedMessage.clientMessageId, "sending", queuedMessage.previewUrl);
+    const blob = await getPendingMediaBlob(queuedMessage.clientMessageId);
+
+    if (!blob) {
+      throw new Error("Attachment data is unavailable locally.");
+    }
+
+    const file = new File([blob], queuedMessage.fileName, {
+      type: queuedMessage.contentType || blob.type || "application/octet-stream"
+    });
+    const confirmedMessage = await uploadMessageMedia(
+      session.token,
+      queuedMessage.conversationId,
+      file,
+      queuedMessage.clientMessageId
+    );
+    mergeIncomingMessage(confirmedMessage);
+  });
+
+  const retryPendingMessages = useEffectEvent(async () => {
+    if (typeof navigator !== "undefined" && !navigator.onLine) {
+      return;
+    }
+
+    for (const queuedMessage of pendingOutgoingQueueRef.current) {
+      try {
+        await sendQueuedTextMessage(queuedMessage);
+      } catch {
+        updatePendingQueueItemStatus(queuedMessage.clientMessageId, "failed");
+      }
+    }
+
+    for (const queuedMessage of pendingOutgoingMediaQueueRef.current) {
+      try {
+        await sendQueuedMediaMessage(queuedMessage);
+      } catch {
+        updatePendingMediaQueueItemStatus(queuedMessage.clientMessageId, "failed", queuedMessage.previewUrl);
+      }
+    }
+  });
+
+  useEffect(() => {
+    syncPendingQueueMessages(pendingOutgoingQueue);
+  }, [currentUser.displayName, currentUser.id, pendingOutgoingQueue, syncPendingQueueMessages]);
+
+  useEffect(() => {
+    syncPendingMediaQueueMessages(pendingOutgoingMediaQueue);
+  }, [currentUser.displayName, currentUser.id, pendingOutgoingMediaQueue, syncPendingMediaQueueMessages]);
+
+  useEffect(() => {
+    let disposed = false;
+
+    async function hydratePendingMediaPreviews() {
+      let didHydratePreview = false;
+      const hydratedQueue = await Promise.all(
+        pendingOutgoingMediaQueue.map(async (queuedMessage) => {
+          if (queuedMessage.previewUrl) {
+            return queuedMessage;
+          }
+
+          try {
+            const blob = await getPendingMediaBlob(queuedMessage.clientMessageId);
+
+            if (!blob) {
+              return queuedMessage;
+            }
+
+            return {
+              ...queuedMessage,
+              previewUrl: URL.createObjectURL(blob)
+            };
+          } catch {
+            return queuedMessage;
+          }
+        })
+      );
+
+      hydratedQueue.forEach((queuedMessage, index) => {
+        if (!pendingOutgoingMediaQueue[index]?.previewUrl && queuedMessage.previewUrl) {
+          didHydratePreview = true;
+        }
+      });
+
+      if (!disposed && didHydratePreview) {
+        setPendingOutgoingMediaQueue((current) =>
+          current.map((queuedMessage) => {
+            const hydrated = hydratedQueue.find((item) => item.clientMessageId === queuedMessage.clientMessageId);
+            return hydrated ?? queuedMessage;
+          })
+        );
+      }
+    }
+
+    void hydratePendingMediaPreviews();
+
+    return () => {
+      disposed = true;
+    };
+  }, [pendingOutgoingMediaQueue]);
+
+  useEffect(() => {
+    function handleBrowserOnline() {
+      void retryPendingMessages();
+    }
+
+    window.addEventListener("online", handleBrowserOnline);
+    return () => {
+      window.removeEventListener("online", handleBrowserOnline);
+    };
+  }, [retryPendingMessages]);
+
+  const syncConversationGroups = useEffectEvent(async () => {
+    const connection = connectionRef.current;
+
+    if (!connection || connection.state !== HubConnectionState.Connected) {
+      return;
+    }
+
+    const nextConversationIds = new Set(conversations.map((conversation) => conversation.id));
+    const joinedConversationIds = joinedConversationIdsRef.current;
+
+    for (const joinedConversationId of Array.from(joinedConversationIds)) {
+      if (!nextConversationIds.has(joinedConversationId)) {
+        try {
+          await connection.invoke("LeaveConversation", joinedConversationId.toString());
+        } catch {
+          return;
+        }
+
+        joinedConversationIds.delete(joinedConversationId);
+      }
+    }
+
+    for (const conversationId of nextConversationIds) {
+      if (joinedConversationIds.has(conversationId)) {
+        continue;
+      }
+
+      try {
+        await connection.invoke("JoinConversation", conversationId.toString());
+        joinedConversationIds.add(conversationId);
+      } catch (caughtError) {
+        setWorkspaceError(
+          caughtError instanceof Error ? caughtError.message : "Unable to join the conversation channel."
+        );
+        return;
+      }
+    }
+  });
+
+  useEffect(() => {
+    let disposed = false;
+
+    async function loadWorkspace() {
+      try {
+        setWorkspaceError("");
+        const [user, fetchedContacts, fetchedConversations] = await Promise.all([
+          getCurrentUser(session.token),
+          getUsers(session.token),
+          getConversations(session.token)
+        ]);
+
+        if (disposed) {
+          return;
+        }
+
+        setCurrentUser(user);
+        setContacts(fetchedContacts);
+        setConversations(sortConversations(fetchedConversations));
+        setActiveConversationId((current) => {
+          if (requestedConversationId && fetchedConversations.some((conversation) => conversation.id === requestedConversationId)) {
+            return requestedConversationId;
+          }
+
+          return current ?? fetchedConversations[0]?.id ?? null;
+        });
+        setStatus(fetchedConversations.length ? "Workspace synced." : "Pick a contact to start chatting.");
+      } catch (caughtError) {
+        if (disposed) {
+          return;
+        }
+
+        const message = caughtError instanceof Error ? caughtError.message : "Unable to load workspace.";
+        setWorkspaceError(message);
+
+        if (message.toLowerCase().includes("401") || message.toLowerCase().includes("unauthorized")) {
+          onSessionChange(null);
+        }
+      }
+    }
+
+    void loadWorkspace();
+
+    return () => {
+      disposed = true;
+    };
+  }, [onSessionChange, requestedConversationId, session.token]);
+
+  useEffect(() => {
+    let disposed = false;
+    const connection = createChatConnection(session.token);
+    connectionRef.current = connection;
+
+    connection.on("ReceiveMessage", (message: Message) => {
+      handleIncomingMessage(message);
+    });
+
+    connection.on("MessageReceiptsUpdated", (receipts: MessageReceipt[]) => {
+      applyReceiptUpdates(receipts);
+    });
+
+    connection.on("MessageUpdated", (message: Message) => {
+      applyMessagePatch(message);
+    });
+
+    connection.on("MessageDeleted", (message: Message) => {
+      applyMessagePatch(message);
+    });
+
+    connection.on("TypingStarted", ({ conversationId, userId, displayName }: TypingPayload) => {
+      if (userId === currentUser.id) {
+        return;
+      }
+
+      setTypingByConversation((current) => ({
+        ...current,
+        [conversationId]: {
+          userId,
+          displayName: displayName ?? "Someone"
+        }
+      }));
+      refreshIncomingTypingTimeout(conversationId);
+    });
+
+    connection.on("TypingStopped", ({ conversationId, userId }: TypingPayload) => {
+      if (userId === currentUser.id) {
+        return;
+      }
+
+      clearIncomingTyping(conversationId, userId);
+    });
+
+    connection.on("PresenceSnapshot", (userIds: string[]) => {
+      setOnlineUserIds(new Set(userIds));
+    });
+
+    connection.on("PresenceChanged", ({ userId, isOnline }: PresenceChangedPayload) => {
+      setOnlineUserIds((current) => {
+        const next = new Set(current);
+
+        if (isOnline) {
+          next.add(userId);
+        } else {
+          next.delete(userId);
+        }
+
+        return next;
+      });
+    });
+
+    connection.on("FriendshipChanged", ({ userId, friendshipStatus, friendshipRequestId }: FriendshipChangedPayload) => {
+      setContacts((current) =>
+        current.map((contact) =>
+          contact.id === userId
+            ? {
+                ...contact,
+                friendshipStatus,
+                friendshipRequestId: friendshipRequestId ?? null
+              }
+            : contact
+        )
+      );
+    });
+
+    connection.on("ConversationCreated", (conversation: Conversation) => {
+      setConversations((current) => upsertConversation(current, conversation));
+      setActiveConversationId((current) =>
+        requestedConversationId && requestedConversationId === conversation.id ? conversation.id : current ?? conversation.id
+      );
+      setStatus(`Conversation ready with ${conversation.displayName}.`);
+    });
+
+    connection.onreconnecting(() => {
+      setConnectionState("reconnecting");
+    });
+
+    connection.onreconnected(() => {
+      joinedConversationIdsRef.current.clear();
+      setConnectionState("online");
+      setStatus("Realtime connection restored.");
+      setWorkspaceError("");
+      void syncConversationGroups();
+      void retryPendingMessages();
+    });
+
+    connection.onclose(() => {
+      joinedConversationIdsRef.current.clear();
+      setConnectionState("offline");
+      setOnlineUserIds(new Set());
+      setTypingByConversation({});
+      clearOutgoingTyping();
+    });
+
+    const startPromise = connection
+      .start()
+      .then(async () => {
+        if (disposed) {
+          return;
+        }
+
+        joinedConversationIdsRef.current.clear();
+        setConnectionState("online");
+        setWorkspaceError("");
+
+        for (const conversation of conversationsRef.current) {
+          try {
+            await connection.invoke("JoinConversation", conversation.id.toString());
+            joinedConversationIdsRef.current.add(conversation.id);
+          } catch {
+            // The hub auto-joins existing conversations; keep startup resilient.
+          }
+        }
+
+        await syncConversationGroups();
+      })
+      .catch((caughtError) => {
+        if (disposed) {
+          return;
+        }
+
+        setConnectionState("offline");
+        setStatus("Realtime connection unavailable. Falling back to HTTP messaging.");
+        setWorkspaceError(
+          caughtError instanceof Error ? caughtError.message : "Unable to establish realtime connection."
+        );
+      });
+
+    return () => {
+      disposed = true;
+      connection.off("ReceiveMessage");
+      connection.off("MessageReceiptsUpdated");
+      connection.off("MessageUpdated");
+      connection.off("MessageDeleted");
+      connection.off("TypingStarted");
+      connection.off("TypingStopped");
+      connection.off("PresenceSnapshot");
+      connection.off("PresenceChanged");
+      connection.off("FriendshipChanged");
+      connection.off("ConversationCreated");
+
+      if (connectionRef.current === connection) {
+        connectionRef.current = null;
+      }
+
+      joinedConversationIdsRef.current.clear();
+      clearOutgoingTyping();
+      Object.values(incomingTypingTimeoutsRef.current).forEach((timeout) => clearTimeout(timeout));
+      incomingTypingTimeoutsRef.current = {};
+
+      void startPromise.finally(async () => {
+        if (connection.state !== HubConnectionState.Disconnected) {
+          await connection.stop().catch(() => undefined);
+        }
+      });
+    };
+  }, [requestedConversationId, session.token]);
+
+  useEffect(() => {
+    if (!requestedConversationId) {
+      return;
+    }
+
+    if (conversations.some((conversation) => conversation.id === requestedConversationId)) {
+      setActiveConversationId(requestedConversationId);
+    }
+  }, [conversations, requestedConversationId]);
+
+  useEffect(() => {
+    if (!activeConversationId) {
+      return;
+    }
+
+    setUnreadCounts((current) => {
+      if (!current[activeConversationId]) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[activeConversationId];
+      return next;
+    });
+
+    const conversationId = activeConversationId;
+    let disposed = false;
+
+    async function loadConversationMessages() {
+        try {
+          const conversationMessages = await getMessages(session.token, conversationId);
+          const queuedMessages = pendingOutgoingQueueRef.current
+            .filter((queuedMessage) => queuedMessage.conversationId === conversationId)
+            .map((queuedMessage) => createPendingTextMessage(queuedMessage));
+          const queuedMediaMessages = pendingOutgoingMediaQueueRef.current
+            .filter((queuedMessage) => queuedMessage.conversationId === conversationId)
+            .map((queuedMessage) => createPendingMediaMessage(queuedMessage));
+          const mergedConversationMessages = [...conversationMessages];
+
+          for (const queuedMessage of queuedMessages) {
+            if (!mergedConversationMessages.some((message) => message.clientMessageId === queuedMessage.clientMessageId)) {
+              mergedConversationMessages.push(queuedMessage);
+            }
+          }
+
+          for (const queuedMessage of queuedMediaMessages) {
+            if (!mergedConversationMessages.some((message) => message.clientMessageId === queuedMessage.clientMessageId)) {
+              mergedConversationMessages.push(queuedMessage);
+            }
+          }
+
+          if (!disposed) {
+            setMessagesByConversation((current) => ({
+              ...current,
+              [conversationId]: mergedConversationMessages
+            }));
+
+            void acknowledgeConversationRead(conversationId, mergedConversationMessages);
+          }
+        } catch (caughtError) {
+        if (!disposed) {
+          setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to load messages.");
+        }
+      }
+    }
+
+    void loadConversationMessages();
+
+    return () => {
+      disposed = true;
+    };
+  }, [activeConversationId, session.token]);
+
+  useEffect(() => {
+    if (connectionState !== "online") {
+      return;
+    }
+
+    void syncConversationGroups();
+    void retryPendingMessages();
+  }, [connectionState, conversations, retryPendingMessages]);
+
+  useEffect(() => {
+    const typingConversationId = outgoingTypingConversationIdRef.current;
+
+    if (typingConversationId && typingConversationId !== activeConversationId) {
+      clearOutgoingTyping(typingConversationId);
+    }
+  }, [activeConversationId]);
+
+  useEffect(() => {
+    const messageStream = messageStreamRef.current;
+
+    if (!messageStream) {
+      return;
+    }
+
+    messageStream.scrollTo({
+      top: messageStream.scrollHeight,
+      behavior: "smooth"
+    });
+  }, [activeConversationId, messages]);
+
+  async function handleSelectContact(contact: AuthUser) {
+    try {
+      const existingConversation = conversationByUserId.get(contact.id);
+
+      if (existingConversation) {
+        setActiveConversationId(existingConversation.id);
+        setStatus(`Opened chat with ${contact.displayName}.`);
+        return;
+      }
+
+      const conversation = await createConversation(session.token, [contact.id]);
+      setConversations((current) => upsertConversation(current, conversation));
+      setActiveConversationId(conversation.id);
+      setStatus(`Conversation ready with ${contact.displayName}.`);
+    } catch (caughtError) {
+      setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to create conversation.");
+    }
+  }
+
+  function handleSendMessage(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!activeConversationId || !draft.trim()) {
+      return;
+    }
+
+    const text = draft.trim();
+    const queuedMessage: PendingOutgoingTextMessage = {
+      tempId: nextTempMessageIdRef.current,
+      clientMessageId: crypto.randomUUID(),
+      conversationId: activeConversationId,
+      text,
+      createdAt: new Date().toISOString(),
+      status: "sending"
+    };
+
+    nextTempMessageIdRef.current -= 1;
+    setDraft("");
+    clearOutgoingTyping(activeConversationId);
+    setPendingOutgoingQueue((current) => [...current, queuedMessage]);
+    mergeIncomingMessage(createPendingTextMessage(queuedMessage));
+
+    startSendTransition(async () => {
+      try {
+        await sendQueuedTextMessage(queuedMessage);
+        setWorkspaceError("");
+      } catch (caughtError) {
+        updatePendingQueueItemStatus(queuedMessage.clientMessageId, "failed");
+        setWorkspaceError(
+          caughtError instanceof Error ? caughtError.message : "Message queued. It will retry when you are back online."
+        );
+      }
+    });
+  }
+
+  async function handleSendFriendRequest(recipientId: string) {
+    try {
+      await sendFriendRequest(session.token, recipientId);
+      await refreshContacts();
+      setStatus("Friend request sent.");
+    } catch (caughtError) {
+      setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to send friend request.");
+    }
+  }
+
+  async function handleAcceptFriendRequest(requestId: number) {
+    try {
+      await acceptFriendRequest(session.token, requestId);
+      await refreshContacts();
+      setStatus("Friend request accepted.");
+    } catch (caughtError) {
+      setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to accept friend request.");
+    }
+  }
+
+  async function handleDeclineFriendRequest(requestId: number) {
+    try {
+      await declineFriendRequest(session.token, requestId);
+      await refreshContacts();
+      setStatus("Friend request declined.");
+    } catch (caughtError) {
+      setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to decline friend request.");
+    }
+  }
+
+  async function handleUpdateMessage(messageId: number, text: string) {
+    const updated = await updateMessage(session.token, messageId, text);
+    applyMessagePatch(updated);
+  }
+
+  async function handleDeleteMessage(messageId: number) {
+    const deleted = await deleteMessage(session.token, messageId);
+    applyMessagePatch(deleted);
+  }
+
+  function handleUploadMedia(file: File) {
+    if (!activeConversationId) {
+      return;
+    }
+
+    const previewUrl = file.type.startsWith("image/") ? URL.createObjectURL(file) : "";
+    const queuedMessage: PendingOutgoingMediaMessage = {
+      tempId: nextTempMessageIdRef.current,
+      clientMessageId: crypto.randomUUID(),
+      conversationId: activeConversationId,
+      fileName: file.name,
+      contentType: file.type || "application/octet-stream",
+      fileSize: file.size,
+      createdAt: new Date().toISOString(),
+      status: "sending",
+      previewUrl
+    };
+
+    nextTempMessageIdRef.current -= 1;
+    setPendingOutgoingMediaQueue((current) => [...current, queuedMessage]);
+    mergeIncomingMessage(createPendingMediaMessage(queuedMessage));
+
+    startUploadTransition(async () => {
+      try {
+        await savePendingMediaBlob(queuedMessage.clientMessageId, file);
+        await sendQueuedMediaMessage(queuedMessage);
+        setStatus(file.type.startsWith("image/") ? "Photo sent." : "File sent.");
+        setWorkspaceError("");
+      } catch (caughtError) {
+        updatePendingMediaQueueItemStatus(queuedMessage.clientMessageId, "failed", previewUrl);
+        setWorkspaceError(
+          caughtError instanceof Error ? caughtError.message : "Attachment queued. It will retry when you are back online."
+        );
+      }
+    });
+  }
+
+  async function handleRetryMessage(clientMessageId: string) {
+    const queuedMessage = pendingOutgoingQueueRef.current.find((message) => message.clientMessageId === clientMessageId);
+
+    if (queuedMessage) {
+      try {
+        await sendQueuedTextMessage(queuedMessage);
+        setWorkspaceError("");
+      } catch (caughtError) {
+        updatePendingQueueItemStatus(clientMessageId, "failed");
+        setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to retry message.");
+      }
+
+      return;
+    }
+
+    const queuedMediaMessage = pendingOutgoingMediaQueueRef.current.find((message) => message.clientMessageId === clientMessageId);
+
+    if (!queuedMediaMessage) {
+      return;
+    }
+
+    try {
+      await sendQueuedMediaMessage(queuedMediaMessage);
+      setWorkspaceError("");
+    } catch (caughtError) {
+      updatePendingMediaQueueItemStatus(clientMessageId, "failed", queuedMediaMessage.previewUrl);
+      setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to retry attachment.");
+    }
+  }
+
+  function getFriendshipLabel(contact: AuthUser) {
+    switch (contact.friendshipStatus) {
+      case "friends":
+        return "Friend";
+      case "incoming":
+        return "Sent you a request";
+      case "outgoing":
+        return "Request sent";
+      default:
+        return null;
+    }
+  }
+
+  function openProfilePanel(editMode = false) {
+    setSidebarView("profile");
+    setProfileError("");
+    setProfileStatus("");
+    setIsEditingProfile(editMode);
+    setProfileForm(createProfileForm(currentUser));
+  }
+
+  function handleShowFriends() {
+    setSidebarView("friends");
+    setIsEditingProfile(false);
+  }
+
+  function handleShowRequests() {
+    setSidebarView("requests");
+    setIsEditingProfile(false);
+  }
+
+  function handleShowDiscover() {
+    setSidebarView("discover");
+    setIsEditingProfile(false);
+  }
+
+  function handleProfileFieldChange(field: keyof UpdateProfileRequest, value: string) {
+    setProfileForm((current) => ({
+      ...current,
+      [field]: value
+    }));
+  }
+
+  function handleCancelProfileEdit() {
+    setIsEditingProfile(false);
+    setProfileError("");
+    setProfileStatus("");
+    setProfileForm(createProfileForm(currentUser));
+  }
+
+  function handleProfileImageUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setProfileForm((current) => ({
+        ...current,
+        profileImageUrl: typeof reader.result === "string" ? reader.result : current.profileImageUrl
+      }));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function handleSaveProfile(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setProfileError("");
+    setProfileStatus("");
+
+    startProfileTransition(async () => {
+      try {
+        const updatedUser = await updateCurrentUser(session.token, profileForm);
+        setCurrentUser(updatedUser);
+        onSessionChange({
+          ...session,
+          user: updatedUser
+        });
+        setIsEditingProfile(false);
+        setProfileStatus("Profile updated.");
+      } catch (caughtError) {
+        setProfileError(caughtError instanceof Error ? caughtError.message : "Unable to update profile.");
+      }
+    });
+  }
+
+  return (
+    <main className="workspace-shell">
+      <section className={`workspace-frame ${activeConversation ? "mobile-chat-open" : "mobile-sidebar-open"}`}>
+        <aside className="sidebar-shell">
+          <SidebarRail
+            currentUser={currentUser}
+            sidebarView={sidebarView}
+            requestCount={incomingRequestContacts.length}
+            discoverCount={discoverContacts.length}
+            onShowFriends={handleShowFriends}
+            onShowRequests={handleShowRequests}
+            onShowDiscover={handleShowDiscover}
+            onShowProfile={() => openProfilePanel(false)}
+            onEditProfile={() => openProfilePanel(true)}
+            onLogout={() => onSessionChange(null)}
+          />
+
+          <div className="sidebar">
+            {sidebarView !== "profile" ? (
+              <PeopleSidebar
+                mode={sidebarView}
+                search={search}
+                notificationPermission={notificationPermission}
+                onSearchChange={setSearch}
+                incomingRequestContacts={incomingRequestContacts}
+                friendContacts={friendContacts}
+                discoverContacts={discoverContacts}
+                conversationByUserId={conversationByUserId}
+                activeConversationId={activeConversationId}
+                unreadCounts={unreadCounts}
+                onlineUserIds={onlineUserIds}
+                onSelectContact={handleSelectContact}
+                onAcceptFriendRequest={handleAcceptFriendRequest}
+                onDeclineFriendRequest={handleDeclineFriendRequest}
+                onSendFriendRequest={handleSendFriendRequest}
+                getFriendshipLabel={getFriendshipLabel}
+              />
+            ) : (
+              <ProfileSidebar
+                currentUser={currentUser}
+                isEditingProfile={isEditingProfile}
+                profileForm={profileForm}
+                profileError={profileError}
+                profileStatus={profileStatus}
+                isSavingProfile={isSavingProfile}
+                onShowPeople={handleShowFriends}
+                onStartEdit={() => setIsEditingProfile(true)}
+                onCancelEdit={handleCancelProfileEdit}
+                onLogout={() => onSessionChange(null)}
+                onProfileFieldChange={handleProfileFieldChange}
+                onProfileImageUpload={handleProfileImageUpload}
+                onSaveProfile={handleSaveProfile}
+              />
+            )}
+          </div>
+        </aside>
+
+        <ChatPanel
+          activeConversation={activeConversation}
+          activeConversationPresence={activeConversationPresence}
+          activeDirectContact={activeDirectContact}
+          currentUser={currentUser}
+          messages={messages}
+          messageStreamRef={messageStreamRef}
+          draft={draft}
+          isSending={isSending}
+          isUploadingMedia={isUploadingMedia}
+          onDraftChange={handleDraftChange}
+          onSendMessage={handleSendMessage}
+          onUploadMedia={handleUploadMedia}
+          onUpdateMessage={handleUpdateMessage}
+          onDeleteMessage={handleDeleteMessage}
+          onRetryMessage={handleRetryMessage}
+          onSendFriendRequest={handleSendFriendRequest}
+          onAcceptFriendRequest={handleAcceptFriendRequest}
+          onDeclineFriendRequest={handleDeclineFriendRequest}
+          onMobileBack={() => setActiveConversationId(null)}
+        />
+      </section>
+    </main>
+  );
+}
+
+export default ChatView;

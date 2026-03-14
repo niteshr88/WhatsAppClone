@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#ede8f5" />
+      <stop offset="100%" stop-color="#ffd7e4" />
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="32" fill="url(#bg)" />
+  <path d="M42 118 74 44l44 44-76 30Z" fill="#7091e6" />
+  <path d="m76 48 14 14-36 14 22-28Z" fill="#3d52a0" opacity="0.9" />
+  <circle cx="115" cy="42" r="7" fill="#f59e0b" />
+  <circle cx="124" cy="68" r="6" fill="#22c55e" />
+  <circle cx="98" cy="34" r="5" fill="#ef4444" />
+  <text x="80" y="146" fill="#3d52a0" font-family="Arial, sans-serif" font-size="24" font-weight="700" text-anchor="middle">PARTY</text>
+</svg>

@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#e7f2ff" />
+      <stop offset="100%" stop-color="#adbbda" />
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="32" fill="url(#bg)" />
+  <circle cx="80" cy="80" r="42" fill="#ffffff" opacity="0.68" />
+  <rect x="43" y="58" width="30" height="16" rx="8" fill="#3d52a0" />
+  <rect x="87" y="58" width="30" height="16" rx="8" fill="#3d52a0" />
+  <path d="M56 102c10 8 38 8 48 0" fill="none" stroke="#3d52a0" stroke-linecap="round" stroke-width="7" />
+  <text x="80" y="144" fill="#3d52a0" font-family="Arial, sans-serif" font-size="26" font-weight="700" text-anchor="middle">COOL</text>
+</svg>

@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 160 160">
+  <defs>
+    <linearGradient id="bg" x1="0" x2="1" y1="0" y2="1">
+      <stop offset="0%" stop-color="#ede8f5" />
+      <stop offset="100%" stop-color="#adbbda" />
+    </linearGradient>
+  </defs>
+  <rect width="160" height="160" rx="32" fill="url(#bg)" />
+  <circle cx="80" cy="72" r="34" fill="#7091e6" opacity="0.18" />
+  <text x="80" y="92" fill="#3d52a0" font-family="Arial, sans-serif" font-size="46" font-weight="700" text-anchor="middle">HEY</text>
+</svg>
