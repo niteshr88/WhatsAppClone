@@ -27,6 +27,13 @@ namespace WhatsAppClone.API.Hubs
             return UserConnections.TryGetValue(userId, out var connections) && !connections.IsEmpty;
         }
 
+        public static IReadOnlyCollection<string> GetConnectionIds(string userId)
+        {
+            return UserConnections.TryGetValue(userId, out var connections)
+                ? connections.Keys.ToArray()
+                : [];
+        }
+
         public override async Task OnConnectedAsync()
         {
             var userId = GetCurrentUserId();
@@ -385,3 +392,4 @@ namespace WhatsAppClone.API.Hubs
         }
     }
 }
+

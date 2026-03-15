@@ -10,6 +10,8 @@ import type {
   RegisterRequest,
   ResetPasswordRequest,
   Session,
+  UpdateConversationParticipantsRequest,
+  UpdateGroupSettingsRequest,
   UpdateProfileRequest
 } from "./types";
 
@@ -138,6 +140,18 @@ export function createConversation(token: string, participantIds: string[]) {
 
 export function createGroupConversation(token: string, payload: CreateGroupConversationRequest) {
   return request<Conversation>("/api/Conversations", "POST", token, payload);
+}
+
+export function updateGroupSettings(token: string, conversationId: number, payload: UpdateGroupSettingsRequest) {
+  return request<Conversation>(`/api/Conversations/${conversationId}/settings`, "PUT", token, payload);
+}
+
+export function addGroupParticipants(token: string, conversationId: number, payload: UpdateConversationParticipantsRequest) {
+  return request<Conversation>(`/api/Conversations/${conversationId}/participants`, "POST", token, payload);
+}
+
+export function removeGroupParticipant(token: string, conversationId: number, participantId: string) {
+  return request<Conversation>(`/api/Conversations/${conversationId}/participants/${encodeURIComponent(participantId)}`, "DELETE", token);
 }
 
 export function deleteConversation(token: string, conversationId: number) {

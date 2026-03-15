@@ -72,12 +72,18 @@ function PeopleSidebar({
 
     return (
       <span className={`avatar-badge ${isOnline ? "live" : ""}`}>
-        {profileImageUrl ? (
-          <img alt={contact.displayName} className="avatar-image" src={profileImageUrl} />
-        ) : (
-          initials(contact.displayName)
-        )}
+        {profileImageUrl ? <img alt={contact.displayName} className="avatar-image" src={profileImageUrl} /> : initials(contact.displayName)}
         <span className={`presence-dot ${isOnline ? "online" : ""}`} />
+      </span>
+    );
+  }
+
+  function renderGroupAvatar(conversation: Conversation) {
+    const groupImageUrl = resolveMediaUrl(conversation.groupImageUrl);
+
+    return (
+      <span className="avatar-badge group-avatar">
+        {groupImageUrl ? <img alt={conversation.displayName} className="avatar-image" src={groupImageUrl} /> : initials(conversation.displayName)}
       </span>
     );
   }
@@ -117,16 +123,15 @@ function PeopleSidebar({
         <input value={search} onChange={(event) => onSearchChange(event.target.value)} placeholder="Start a new conversation" />
       </label>
 
-      <section className="sidebar-section">
-        <div className="section-heading">
-          <span>{title}</span>
-          <span>{titleCount}</span>
-        </div>
-        <div
-          className={`sidebar-scroll-list ${isRequestsMode ? "request-list" : "contact-list"} ${
-            !isRequestsMode && !isDiscoverMode ? "compact-list" : ""
-          }`}
-        >
+      <section className={`sidebar-section ${!isRequestsMode && !isDiscoverMode ? "friends-mode" : ""}`}>
+        {isRequestsMode || isDiscoverMode ? (
+          <div className="section-heading">
+            <span>{title}</span>
+            <span>{titleCount}</span>
+          </div>
+        ) : null}
+
+        <div className={`sidebar-scroll-list ${isRequestsMode ? "request-list" : "contact-list"}`}>
           {isRequestsMode ? (
             incomingRequestContacts.length ? (
               incomingRequestContacts.map((contact) => {
@@ -146,18 +151,10 @@ function PeopleSidebar({
                       </span>
                     </button>
                     <div className="request-card-actions">
-                      <button
-                        className="chat-action-button accent"
-                        type="button"
-                        onClick={() => void onAcceptFriendRequest(contact.friendshipRequestId!)}
-                      >
+                      <button className="chat-action-button accent" type="button" onClick={() => void onAcceptFriendRequest(contact.friendshipRequestId!)}>
                         Accept
                       </button>
-                      <button
-                        className="chat-action-button muted"
-                        type="button"
-                        onClick={() => void onDeclineFriendRequest(contact.friendshipRequestId!)}
-                      >
+                      <button className="chat-action-button muted" type="button" onClick={() => void onDeclineFriendRequest(contact.friendshipRequestId!)}>
                         Decline
                       </button>
                     </div>
@@ -172,94 +169,77 @@ function PeopleSidebar({
           ) : null}
 
           {!isRequestsMode && !isDiscoverMode ? (
-            <>
-              <div className="sidebar-subsection">
-                <div className="section-heading inner">
-                  <span>Group rooms</span>
-                  <span>{groupConversations.length}</span>
+            <div className="friends-collection">
+              {groupConversations.length ? (
+                <div className="conversation-list clean-group-list">
+                  {groupConversations.map((conversation) => {
+                    const isActive = conversation.id === activeConversationId;
+                    const unreadCount = unreadCounts[conversation.id] ?? 0;
+                    const temporaryLabel = conversation.isTemporary ? formatGroupExpiry(conversation.expiresAt) : "Permanent";
+
+                    return (
+                      <button
+                        key={conversation.id}
+                        className={`contact-card group-card ${isActive ? "active" : ""}`}
+                        type="button"
+                        onClick={() => onSelectConversation(conversation.id)}
+                      >
+                        {renderGroupAvatar(conversation)}
+                        <span className="conversation-copy">
+                          <span className="conversation-heading-row">
+                            <strong>{conversation.displayName}</strong>
+                            <span className={`friendship-tag ${conversation.isTemporary ? "incoming" : "friends"}`}>{temporaryLabel}</span>
+                          </span>
+                          <small>{conversation.lastMessageText ?? "Group room ready"}</small>
+                        </span>
+                        <span className="conversation-meta">
+                          <time>{formatSidebarDate(conversation.lastMessageAt ?? conversation.createdAt)}</time>
+                          {unreadCount > 0 ? <span className="unread-badge">{unreadCount}</span> : null}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
-                {groupConversations.length ? (
-                  <div className="conversation-list">
-                    {groupConversations.map((conversation) => {
-                      const isActive = conversation.id === activeConversationId;
-                      const unreadCount = unreadCounts[conversation.id] ?? 0;
-                      const temporaryLabel = conversation.isTemporary ? formatGroupExpiry(conversation.expiresAt) : "Permanent";
+              ) : null}
 
-                      return (
-                        <button
-                          key={conversation.id}
-                          className={`contact-card group-card ${isActive ? "active" : ""}`}
-                          type="button"
-                          onClick={() => onSelectConversation(conversation.id)}
-                        >
-                          <span className="avatar-badge group-avatar">{initials(conversation.displayName)}</span>
-                          <span className="conversation-copy">
-                            <span className="conversation-heading-row">
-                              <strong>{conversation.displayName}</strong>
-                              <span className={`friendship-tag ${conversation.isTemporary ? "incoming" : "friends"}`}>
-                                {temporaryLabel}
-                              </span>
-                            </span>
-                            <small>{conversation.lastMessageText ?? "Group room ready"}</small>
-                          </span>
-                          <span className="conversation-meta">
-                            <time>{formatSidebarDate(conversation.lastMessageAt ?? conversation.createdAt)}</time>
-                            {unreadCount > 0 ? <span className="unread-badge">{unreadCount}</span> : null}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="sidebar-empty subtle">
-                    <p>No group rooms yet.</p>
-                  </div>
-                )}
-              </div>
+              {friendContacts.length ? (
+                <div className="compact-list clean-friend-list">
+                  {friendContacts.map((contact) => {
+                    const conversation = conversationByUserId.get(contact.id);
+                    const isActive = conversation?.id === activeConversationId;
+                    const unreadCount = conversation ? unreadCounts[conversation.id] ?? 0 : 0;
+                    const isOnline = onlineUserIds.has(contact.id);
 
-              <div className="sidebar-subsection">
-                <div className="section-heading inner">
-                  <span>Friends</span>
-                  <span>{friendContacts.length}</span>
+                    return (
+                      <button
+                        key={contact.id}
+                        className={`contact-card ${isActive ? "active" : ""}`}
+                        type="button"
+                        onClick={() => void onSelectContact(contact)}
+                      >
+                        {renderAvatar(contact, isOnline)}
+                        <span className="conversation-copy">
+                          <span className="conversation-heading-row">
+                            <strong>{contact.displayName}</strong>
+                          </span>
+                          <small>{conversation?.lastMessageText ?? contact.bio ?? "Start a conversation"}</small>
+                        </span>
+                        <span className="conversation-meta">
+                          <time>{conversation ? formatSidebarDate(conversation.lastMessageAt ?? conversation.createdAt) : ""}</time>
+                          {unreadCount > 0 ? <span className="unread-badge">{unreadCount}</span> : null}
+                        </span>
+                      </button>
+                    );
+                  })}
                 </div>
-                {friendContacts.length ? (
-                  <div className="compact-list">
-                    {friendContacts.map((contact) => {
-                      const conversation = conversationByUserId.get(contact.id);
-                      const isActive = conversation?.id === activeConversationId;
-                      const unreadCount = conversation ? unreadCounts[conversation.id] ?? 0 : 0;
-                      const isOnline = onlineUserIds.has(contact.id);
+              ) : null}
 
-                      return (
-                        <button
-                          key={contact.id}
-                          className={`contact-card ${isActive ? "active" : ""}`}
-                          type="button"
-                          onClick={() => void onSelectContact(contact)}
-                        >
-                          {renderAvatar(contact, isOnline)}
-                          <span className="conversation-copy">
-                            <span className="conversation-heading-row">
-                              <strong>{contact.displayName}</strong>
-                              <span className="friendship-tag friends">Friend</span>
-                            </span>
-                            <small>{conversation?.lastMessageText ?? contact.bio ?? "Start a conversation"}</small>
-                          </span>
-                          <span className="conversation-meta">
-                            <time>{conversation ? formatSidebarDate(conversation.lastMessageAt ?? conversation.createdAt) : ""}</time>
-                            {unreadCount > 0 ? <span className="unread-badge">{unreadCount}</span> : null}
-                          </span>
-                        </button>
-                      );
-                    })}
-                  </div>
-                ) : (
-                  <div className="sidebar-empty">
-                    <p>No friends yet.</p>
-                  </div>
-                )}
-              </div>
-            </>
+              {!groupConversations.length && !friendContacts.length ? (
+                <div className="sidebar-empty">
+                  <p>No chats yet. Start with a friend or create a group.</p>
+                </div>
+              ) : null}
+            </div>
           ) : null}
 
           {isDiscoverMode ? (
@@ -278,9 +258,7 @@ function PeopleSidebar({
                       <span className="conversation-copy">
                         <span className="conversation-heading-row">
                           <strong>{contact.displayName}</strong>
-                          {friendshipLabel ? (
-                            <span className={`friendship-tag ${contact.friendshipStatus ?? "none"}`}>{friendshipLabel}</span>
-                          ) : null}
+                          {friendshipLabel ? <span className={`friendship-tag ${contact.friendshipStatus ?? "none"}`}>{friendshipLabel}</span> : null}
                         </span>
                         <small>{conversation?.lastMessageText ?? "Start a conversation"}</small>
                       </span>

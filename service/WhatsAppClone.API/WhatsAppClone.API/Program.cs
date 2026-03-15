@@ -104,12 +104,18 @@ namespace WhatsAppClone.API
                     dbContext.Database.ExecuteSqlRaw(
                         """
                         IF OBJECT_ID(N'[dbo].[Conversations]', 'U') IS NOT NULL
-                        BEGIN
-                            IF COL_LENGTH('Conversations', 'Name') IS NULL
-                                ALTER TABLE [dbo].[Conversations] ADD [Name] nvarchar(200) NULL;
+                         BEGIN
+                             IF COL_LENGTH('Conversations', 'Name') IS NULL
+                                 ALTER TABLE [dbo].[Conversations] ADD [Name] nvarchar(200) NULL;
 
-                            IF COL_LENGTH('Conversations', 'AdminUserId') IS NULL
-                                ALTER TABLE [dbo].[Conversations] ADD [AdminUserId] nvarchar(450) NULL;
+                             IF COL_LENGTH('Conversations', 'GroupImageUrl') IS NULL
+                                 ALTER TABLE [dbo].[Conversations] ADD [GroupImageUrl] nvarchar(max) NULL;
+
+                             IF COL_LENGTH('Conversations', 'GroupRules') IS NULL
+                                 ALTER TABLE [dbo].[Conversations] ADD [GroupRules] nvarchar(max) NULL;
+
+                             IF COL_LENGTH('Conversations', 'AdminUserId') IS NULL
+                                 ALTER TABLE [dbo].[Conversations] ADD [AdminUserId] nvarchar(450) NULL;
 
                             IF COL_LENGTH('Conversations', 'IsTemporary') IS NULL
                                 ALTER TABLE [dbo].[Conversations] ADD [IsTemporary] bit NOT NULL CONSTRAINT [DF_Conversations_IsTemporary] DEFAULT(0);
@@ -210,3 +216,4 @@ namespace WhatsAppClone.API
         }
     }
 }
+

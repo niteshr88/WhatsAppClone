@@ -21,6 +21,8 @@ export type Conversation = {
   displayName: string;
   groupName?: string | null;
   adminUserId?: string | null;
+  groupImageUrl?: string | null;
+  groupRules?: string | null;
   isTemporary?: boolean;
   expiresAt?: string | null;
   canManage?: boolean;
@@ -91,4 +93,14 @@ export type UpdateProfileRequest = {
   displayName: string;
   profileImageUrl?: string | null;
   bio?: string | null;
+};
+
+export type UpdateGroupSettingsRequest = {
+  groupName: string;
+  groupImageUrl?: string | null;
+  groupRules?: string | null;
+};
+
+export type UpdateConversationParticipantsRequest = {
+  participantIds: string[];
 };

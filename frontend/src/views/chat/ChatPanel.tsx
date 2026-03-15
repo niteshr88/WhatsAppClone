@@ -25,6 +25,7 @@ type ChatPanelProps = {
   onUpdateMessage: (messageId: number, text: string) => Promise<void>;
   onDeleteMessage: (messageId: number) => Promise<void>;
   onDeleteConversation?: () => void | Promise<void>;
+  onOpenGroupSettings?: () => void;
   onRetryMessage: (clientMessageId: string) => void | Promise<void>;
   onSendFriendRequest: (recipientId: string) => void | Promise<void>;
   onAcceptFriendRequest: (requestId: number) => void | Promise<void>;
@@ -216,6 +217,7 @@ function ChatPanel({
   onUpdateMessage,
   onDeleteMessage,
   onDeleteConversation,
+  onOpenGroupSettings,
   onRetryMessage,
   onSendFriendRequest,
   onAcceptFriendRequest,
@@ -410,7 +412,17 @@ function ChatPanel({
             </button>
           ) : null}
           <span className={`avatar-badge header-avatar ${activeConversationPresence.isOnline ? "live" : ""}`}>
-            {activeDirectContact?.profileImageUrl ? (
+            {activeConversation?.isGroup ? (
+              activeConversation.groupImageUrl ? (
+                <img
+                  alt={activeConversation.displayName}
+                  className="avatar-image"
+                  src={resolveMediaUrl(activeConversation.groupImageUrl)}
+                />
+              ) : (
+                initials(activeConversation.displayName)
+              )
+            ) : activeDirectContact?.profileImageUrl ? (
               <img
                 alt={activeDirectContact.displayName}
                 className="avatar-image"
@@ -496,6 +508,16 @@ function ChatPanel({
                 </button>
                 {activeConversation?.isGroup ? (
                   <>
+                    <button
+                      className="chat-header-menu-item"
+                      type="button"
+                      onClick={() => {
+                        closeHeaderMenu();
+                        onOpenGroupSettings?.();
+                      }}
+                    >
+                      Group settings
+                    </button>
                     <div className="chat-header-menu-divider" />
                     <button className="chat-header-menu-item danger" type="button" onClick={() => void handleDeleteConversationClick()}>
                       Delete group
@@ -913,6 +935,8 @@ function ChatPanel({
 }
 
 export default ChatPanel;
+
+
 
 
 

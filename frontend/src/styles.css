@@ -2425,3 +2425,126 @@ h3 {
   }
 }
 
+
+.group-modal-form textarea {
+  min-height: 104px;
+  resize: vertical;
+}
+
+.group-settings-modal {
+  width: min(100%, 720px);
+}
+
+.group-settings-header {
+  align-items: flex-start;
+}
+
+.group-settings-subtitle {
+  margin: 8px 0 0;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.group-settings-form {
+  gap: 20px;
+}
+
+.group-settings-hero {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 16px 18px;
+  border-radius: 24px;
+  background: rgba(173, 187, 218, 0.14);
+  border: 1px solid rgba(134, 151, 196, 0.18);
+}
+
+.group-settings-avatar-shell {
+  position: relative;
+  width: fit-content;
+}
+
+.group-settings-avatar {
+  width: 88px;
+  height: 88px;
+  font-size: 1.6rem;
+}
+
+.group-settings-image-trigger {
+  position: absolute;
+  right: -4px;
+  bottom: -2px;
+  width: 32px;
+  height: 32px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.24);
+  background: linear-gradient(135deg, #3d52a0 0%, #7091e6 100%);
+  color: #ffffff;
+  box-shadow: 0 12px 20px rgba(61, 82, 160, 0.2);
+  cursor: pointer;
+}
+
+.group-settings-hero-copy {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+}
+
+.group-settings-grid,
+.group-settings-section {
+  display: grid;
+  gap: 12px;
+}
+
+.group-settings-member-list {
+  display: grid;
+  gap: 10px;
+}
+
+.group-settings-member-card {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 14px;
+  border-radius: 18px;
+  border: 1px solid rgba(134, 151, 196, 0.18);
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.group-member-list.compact {
+  max-height: 220px;
+}
+
+.group-member-remove {
+  width: 34px;
+  height: 34px;
+  display: grid;
+  place-items: center;
+  border: 1px solid rgba(180, 35, 24, 0.14);
+  border-radius: 12px;
+  background: rgba(254, 228, 226, 0.88);
+  color: var(--danger);
+}
+
+.group-member-remove-icon {
+  width: 14px;
+  height: 14px;
+}
+
+.group-settings-inline-actions {
+  display: flex;
+  justify-content: flex-end;
+}
+
+.group-settings-empty {
+  padding: 6px 2px 0;
+}
+
+.group-settings-actions {
+  margin-top: 4px;
+}

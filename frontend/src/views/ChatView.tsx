@@ -12,6 +12,7 @@ import type { HubConnection } from "@microsoft/signalr";
 import { useSearchParams } from "react-router-dom";
 import {
   acceptFriendRequest,
+  addGroupParticipants,
   HubConnectionState,
   declineFriendRequest,
   createChatConnection,
@@ -26,9 +27,11 @@ import {
   getWebPushPublicKey,
   getUsers,
   markConversationRead,
+  removeGroupParticipant,
   resolveMediaUrl,
   saveWebPushSubscription,
   sendFriendRequest,
+  updateGroupSettings,
   uploadMessageMedia,
   updateMessage,
   updateCurrentUser
@@ -40,6 +43,7 @@ import type {
   Message,
   MessageReceipt,
   Session,
+  UpdateGroupSettingsRequest,
   UpdateProfileRequest
 } from "../types";
 import {
@@ -61,6 +65,8 @@ import ChatPanel from "./chat/ChatPanel";
 import PeopleSidebar from "./chat/PeopleSidebar";
 import ProfileSidebar from "./chat/ProfileSidebar";
 import SidebarRail from "./chat/SidebarRail";
+import GroupSettingsModal from "./chat/GroupSettingsModal";
+
 
 type ChatViewProps = {
   session: Session;
@@ -189,6 +195,14 @@ function createInitialGroupForm(): CreateGroupFormState {
   };
 }
 
+function createGroupSettingsForm(conversation: Conversation): UpdateGroupSettingsRequest {
+  return {
+    groupName: conversation.groupName ?? conversation.displayName,
+    groupImageUrl: conversation.groupImageUrl ?? "",
+    groupRules: conversation.groupRules ?? ""
+  };
+}
+
 function getExpiresInHours(groupForm: CreateGroupFormState) {
   if (!groupForm.isTemporary) {
     return undefined;
@@ -256,10 +270,16 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
   const [groupForm, setGroupForm] = useState<CreateGroupFormState>(() => createInitialGroupForm());
   const [groupFormError, setGroupFormError] = useState("");
+  const [isGroupSettingsOpen, setIsGroupSettingsOpen] = useState(false);
+  const [groupSettingsForm, setGroupSettingsForm] = useState<UpdateGroupSettingsRequest>({ groupName: "", groupImageUrl: "", groupRules: "" });
+  const [groupSettingsSelectedParticipantIds, setGroupSettingsSelectedParticipantIds] = useState<string[]>([]);
+  const [groupSettingsError, setGroupSettingsError] = useState("");
+  const [groupSettingsStatus, setGroupSettingsStatus] = useState("");
   const [isSending, startSendTransition] = useTransition();
   const [isUploadingMedia, startUploadTransition] = useTransition();
   const [isSavingProfile, startProfileTransition] = useTransition();
   const [isCreatingGroup, startCreateGroupTransition] = useTransition();
+  const [isSavingGroupSettings, startGroupSettingsTransition] = useTransition();
   const connectionRef = useRef<HubConnection | null>(null);
   const joinedConversationIdsRef = useRef<Set<number>>(new Set());
   const messageStreamRef = useRef<HTMLDivElement | null>(null);
@@ -395,6 +415,23 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
           : "Offline"
     };
   }, [activeConversation, activeTypingIndicator, currentUser.id, onlineUserIds]);
+  const activeGroupConversation = activeConversation?.isGroup ? activeConversation : null;
+  const canManageActiveGroup = Boolean(
+    activeGroupConversation &&
+    (activeGroupConversation.canManage || activeGroupConversation.adminUserId === currentUser.id)
+  );
+  const availableGroupContacts = useMemo(
+    () =>
+      activeGroupConversation
+        ? contacts.filter(
+            (contact) =>
+              contact.id !== currentUser.id &&
+              !activeGroupConversation.participants.some((participant) => participant.id === contact.id)
+          )
+        : [],
+    [activeGroupConversation, contacts, currentUser.id]
+  );
+
 
   useEffect(() => {
     conversationsRef.current = conversations;
@@ -444,6 +481,22 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   useEffect(() => {
     setProfileForm(createProfileForm(currentUser));
   }, [currentUser]);
+
+  useEffect(() => {
+    if (!isGroupSettingsOpen) {
+      return;
+    }
+
+    if (!activeGroupConversation) {
+      setIsGroupSettingsOpen(false);
+      setGroupSettingsSelectedParticipantIds([]);
+      setGroupSettingsError("");
+      setGroupSettingsStatus("");
+      return;
+    }
+
+    setGroupSettingsForm(createGroupSettingsForm(activeGroupConversation));
+  }, [activeGroupConversation, isGroupSettingsOpen]);
 
   useEffect(() => {
     setNotificationPermission(getBrowserNotificationPermission());
@@ -1312,6 +1365,10 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       setStatus(`Conversation ready with ${conversation.displayName}.`);
     });
 
+    connection.on("ConversationUpdated", (conversation: Conversation) => {
+      setConversations((current) => upsertConversation(current, conversation));
+    });
+
     connection.on("ConversationDeleted", ({ conversationId }: ConversationDeletedPayload) => {
       removeConversationLocally(conversationId);
       setStatus("Group removed.");
@@ -1384,6 +1441,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       connection.off("PresenceChanged");
       connection.off("FriendshipChanged");
       connection.off("ConversationCreated");
+      connection.off("ConversationUpdated");
       connection.off("ConversationDeleted");
 
       if (connectionRef.current === connection) {
@@ -1536,6 +1594,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       return next;
     });
     setActiveConversationId((current) => (current === conversationId ? null : current));
+    setIsGroupSettingsOpen(false);
   }
 
   function handleSelectConversation(conversationId: number) {
@@ -1574,6 +1633,141 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       ...current,
       [field]: value
     } as CreateGroupFormState));
+  }
+
+  function openGroupSettingsModal() {
+    if (!activeConversation?.isGroup) {
+      return;
+    }
+
+    setIsGroupSettingsOpen(true);
+    setGroupSettingsForm(createGroupSettingsForm(activeConversation));
+    setGroupSettingsSelectedParticipantIds([]);
+    setGroupSettingsError("");
+    setGroupSettingsStatus("");
+  }
+
+  function closeGroupSettingsModal() {
+    setIsGroupSettingsOpen(false);
+    setGroupSettingsSelectedParticipantIds([]);
+    setGroupSettingsError("");
+    setGroupSettingsStatus("");
+  }
+
+  function handleGroupSettingsFieldChange(field: keyof UpdateGroupSettingsRequest, value: string) {
+    setGroupSettingsForm((current) => ({
+      ...current,
+      [field]: value
+    }));
+  }
+
+  function handleGroupSettingsImageUpload(event: ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+
+    if (!file) {
+      return;
+    }
+
+    const reader = new FileReader();
+    reader.onload = () => {
+      setGroupSettingsForm((current) => ({
+        ...current,
+        groupImageUrl: typeof reader.result === "string" ? reader.result : current.groupImageUrl
+      }));
+    };
+    reader.readAsDataURL(file);
+  }
+
+  function handleToggleGroupSettingsParticipant(participantId: string) {
+    setGroupSettingsSelectedParticipantIds((current) =>
+      current.includes(participantId) ? current.filter((id) => id !== participantId) : [...current, participantId]
+    );
+  }
+
+  function applyConversationUpdate(conversation: Conversation) {
+    setConversations((current) => upsertConversation(current, conversation));
+    setStatus(`${conversation.displayName} updated.`);
+  }
+
+  function handleSaveGroupSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!activeGroupConversation) {
+      return;
+    }
+
+    const trimmedGroupName = groupSettingsForm.groupName.trim();
+
+    if (!trimmedGroupName) {
+      setGroupSettingsError("Group name is required.");
+      return;
+    }
+
+    setGroupSettingsError("");
+    setGroupSettingsStatus("");
+
+    startGroupSettingsTransition(async () => {
+      try {
+        const updatedConversation = await updateGroupSettings(session.token, activeGroupConversation.id, {
+          groupName: trimmedGroupName,
+          groupImageUrl: groupSettingsForm.groupImageUrl?.trim() ?? "",
+          groupRules: groupSettingsForm.groupRules?.trim() ?? ""
+        });
+
+        applyConversationUpdate(updatedConversation);
+        setGroupSettingsForm(createGroupSettingsForm(updatedConversation));
+        setGroupSettingsStatus("Group settings saved.");
+      } catch (caughtError) {
+        setGroupSettingsError(caughtError instanceof Error ? caughtError.message : "Unable to save group settings.");
+      }
+    });
+  }
+
+  function handleAddSelectedGroupParticipants() {
+    if (!activeGroupConversation) {
+      return;
+    }
+
+    if (!groupSettingsSelectedParticipantIds.length) {
+      setGroupSettingsError("Select at least one person to add.");
+      return;
+    }
+
+    setGroupSettingsError("");
+    setGroupSettingsStatus("");
+
+    startGroupSettingsTransition(async () => {
+      try {
+        const updatedConversation = await addGroupParticipants(session.token, activeGroupConversation.id, {
+          participantIds: groupSettingsSelectedParticipantIds
+        });
+
+        applyConversationUpdate(updatedConversation);
+        setGroupSettingsForm(createGroupSettingsForm(updatedConversation));
+        setGroupSettingsSelectedParticipantIds([]);
+        setGroupSettingsStatus("People added to the group.");
+      } catch (caughtError) {
+        setGroupSettingsError(caughtError instanceof Error ? caughtError.message : "Unable to add people to the group.");
+      }
+    });
+  }
+
+  function handleRemoveGroupMember(participantId: string) {
+    if (!activeGroupConversation) {
+      return;
+    }
+
+    startGroupSettingsTransition(async () => {
+      try {
+        const updatedConversation = await removeGroupParticipant(session.token, activeGroupConversation.id, participantId);
+
+        applyConversationUpdate(updatedConversation);
+        setGroupSettingsForm(createGroupSettingsForm(updatedConversation));
+        setGroupSettingsStatus("Person removed from the group.");
+      } catch (caughtError) {
+        setGroupSettingsError(caughtError instanceof Error ? caughtError.message : "Unable to remove that person.");
+      }
+    });
   }
 
   async function handleCreateGroupConversation(event: FormEvent<HTMLFormElement>) {
@@ -1958,6 +2152,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
           onUpdateMessage={handleUpdateMessage}
           onDeleteMessage={handleDeleteMessage}
           onDeleteConversation={handleDeleteConversation}
+          onOpenGroupSettings={openGroupSettingsModal}
           onRetryMessage={handleRetryMessage}
           onSendFriendRequest={handleSendFriendRequest}
           onAcceptFriendRequest={handleAcceptFriendRequest}
@@ -2087,12 +2282,38 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
             </div>
           </div>
         ) : null}
+
+        {isGroupSettingsOpen && activeGroupConversation ? (
+          <GroupSettingsModal
+            conversation={activeGroupConversation}
+            availableContacts={availableGroupContacts}
+            selectedParticipantIds={groupSettingsSelectedParticipantIds}
+            form={groupSettingsForm}
+            error={groupSettingsError}
+            status={groupSettingsStatus}
+            isSaving={isSavingGroupSettings}
+            canManage={canManageActiveGroup}
+            onlineUserIds={onlineUserIds}
+            onClose={closeGroupSettingsModal}
+            onFormChange={handleGroupSettingsFieldChange}
+            onGroupImageUpload={handleGroupSettingsImageUpload}
+            onToggleParticipant={handleToggleGroupSettingsParticipant}
+            onSave={handleSaveGroupSettings}
+            onAddParticipants={handleAddSelectedGroupParticipants}
+            onRemoveParticipant={handleRemoveGroupMember}
+          />
+        ) : null}
       </section>
     </main>
   );
 }
 
 export default ChatView;
+
+
+
+
+
 
 
 

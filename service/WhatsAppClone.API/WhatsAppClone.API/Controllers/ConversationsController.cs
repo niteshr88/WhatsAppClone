@@ -165,6 +165,8 @@ namespace WhatsAppClone.API.Controllers
             _context.Conversations.Add(conversation);
             await _context.SaveChangesAsync();
 
+            await AddUsersToConversationGroupAsync(conversation.Id, participantIds);
+
             var summary = await BuildConversationSummary(conversation.Id, currentUserId);
             await NotifyConversationCreated(conversation.Id, participantIds);
             return CreatedAtAction(nameof(GetConversation), new { conversationId = conversation.Id }, summary);
@@ -188,6 +190,176 @@ namespace WhatsAppClone.API.Controllers
             }
 
             return Ok(await BuildConversationSummary(conversationId, currentUserId));
+        }
+
+        [HttpPut("{conversationId:int}/settings")]
+        public async Task<ActionResult<ConversationSummaryDto>> UpdateGroupSettings(int conversationId, UpdateGroupSettingsRequest request)
+        {
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (string.IsNullOrWhiteSpace(currentUserId))
+            {
+                return Unauthorized();
+            }
+
+            await _conversationLifecycleService.CleanupExpiredConversationsAsync();
+
+            var conversation = await GetManageableGroupConversation(conversationId, currentUserId);
+
+            if (conversation is null)
+            {
+                return NotFound();
+            }
+
+            var trimmedName = request.GroupName.Trim();
+
+            if (string.IsNullOrWhiteSpace(trimmedName))
+            {
+                return BadRequest("Group name is required.");
+            }
+
+            conversation.Name = trimmedName;
+            conversation.GroupImageUrl = NormalizeOptionalText(request.GroupImageUrl);
+            conversation.GroupRules = NormalizeOptionalText(request.GroupRules);
+
+            await _context.SaveChangesAsync();
+
+            var participantIds = conversation.Participants
+                .Select(participant => participant.UserId)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            await NotifyConversationUpdated(conversation.Id, participantIds);
+            return Ok(await BuildConversationSummary(conversation.Id, currentUserId));
+        }
+
+        [HttpPost("{conversationId:int}/participants")]
+        public async Task<ActionResult<ConversationSummaryDto>> AddParticipants(int conversationId, UpdateConversationParticipantsRequest request)
+        {
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (string.IsNullOrWhiteSpace(currentUserId))
+            {
+                return Unauthorized();
+            }
+
+            await _conversationLifecycleService.CleanupExpiredConversationsAsync();
+
+            var conversation = await GetManageableGroupConversation(conversationId, currentUserId);
+
+            if (conversation is null)
+            {
+                return NotFound();
+            }
+
+            var incomingParticipantIds = request.ParticipantIds
+                .Where(participantId => !string.IsNullOrWhiteSpace(participantId))
+                .Select(participantId => participantId.Trim())
+                .Where(participantId => !string.Equals(participantId, currentUserId, StringComparison.Ordinal))
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            if (incomingParticipantIds.Count == 0)
+            {
+                return BadRequest("Select at least one person to add.");
+            }
+
+            var existingParticipantIds = conversation.Participants
+                .Select(participant => participant.UserId)
+                .Distinct(StringComparer.Ordinal)
+                .ToHashSet(StringComparer.Ordinal);
+
+            var newParticipantIds = incomingParticipantIds
+                .Where(participantId => !existingParticipantIds.Contains(participantId))
+                .ToList();
+
+            if (newParticipantIds.Count == 0)
+            {
+                return BadRequest("Those people are already in the group.");
+            }
+
+            var users = await _context.Users
+                .AsNoTracking()
+                .Where(user => newParticipantIds.Contains(user.Id))
+                .Select(user => user.Id)
+                .ToListAsync();
+
+            if (users.Count != newParticipantIds.Count)
+            {
+                return BadRequest("One or more selected people do not exist.");
+            }
+
+            foreach (var participantId in newParticipantIds)
+            {
+                conversation.Participants.Add(new ConversationParticipant
+                {
+                    ConversationId = conversation.Id,
+                    UserId = participantId
+                });
+            }
+
+            await _context.SaveChangesAsync();
+            await AddUsersToConversationGroupAsync(conversation.Id, newParticipantIds);
+
+            var allParticipantIds = conversation.Participants
+                .Select(participant => participant.UserId)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            await NotifyConversationUpdated(conversation.Id, allParticipantIds);
+            await NotifyConversationCreated(conversation.Id, newParticipantIds);
+            return Ok(await BuildConversationSummary(conversation.Id, currentUserId));
+        }
+
+        [HttpDelete("{conversationId:int}/participants/{participantId}")]
+        public async Task<ActionResult<ConversationSummaryDto>> RemoveParticipant(int conversationId, string participantId)
+        {
+            var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
+
+            if (string.IsNullOrWhiteSpace(currentUserId))
+            {
+                return Unauthorized();
+            }
+
+            await _conversationLifecycleService.CleanupExpiredConversationsAsync();
+
+            var conversation = await GetManageableGroupConversation(conversationId, currentUserId);
+
+            if (conversation is null)
+            {
+                return NotFound();
+            }
+
+            if (string.Equals(participantId, currentUserId, StringComparison.Ordinal))
+            {
+                return BadRequest("The admin cannot remove themselves from the group.");
+            }
+
+            var participant = conversation.Participants.SingleOrDefault(item => item.UserId == participantId);
+
+            if (participant is null)
+            {
+                return NotFound("That person is not in the group.");
+            }
+
+            if (conversation.Participants.Count <= 2)
+            {
+                return BadRequest("A group needs at least two participants.");
+            }
+
+            _context.ConversationParticipants.Remove(participant);
+            await _context.SaveChangesAsync();
+            await RemoveUsersFromConversationGroupAsync(conversation.Id, new[] { participantId });
+
+            var remainingParticipantIds = conversation.Participants
+                .Where(item => item.UserId != participantId)
+                .Select(item => item.UserId)
+                .Distinct(StringComparer.Ordinal)
+                .ToList();
+
+            await NotifyConversationUpdated(conversation.Id, remainingParticipantIds);
+            await NotifyConversationDeleted(conversation.Id, new[] { participantId });
+            return Ok(await BuildConversationSummary(conversation.Id, currentUserId));
         }
 
         [HttpDelete("{conversationId:int}")]
@@ -231,6 +403,26 @@ namespace WhatsAppClone.API.Controllers
             await NotifyConversationDeleted(conversationId, participantIds);
 
             return NoContent();
+        }
+
+        private async Task<Conversation?> GetManageableGroupConversation(int conversationId, string currentUserId)
+        {
+            var conversation = await _conversationLifecycleService.ActiveConversationsQuery()
+                .Where(candidate => candidate.Id == conversationId)
+                .Include(candidate => candidate.Participants)
+                .SingleOrDefaultAsync();
+
+            if (conversation is null || !conversation.IsGroup)
+            {
+                return null;
+            }
+
+            if (!string.Equals(conversation.AdminUserId, currentUserId, StringComparison.Ordinal))
+            {
+                throw new UnauthorizedAccessException();
+            }
+
+            return conversation;
         }
 
         private async Task<ConversationSummaryDto> BuildConversationSummary(int conversationId, string currentUserId)
@@ -284,6 +476,8 @@ namespace WhatsAppClone.API.Controllers
                 DisplayName = displayName,
                 GroupName = conversation.Name,
                 AdminUserId = conversation.AdminUserId,
+                GroupImageUrl = conversation.GroupImageUrl,
+                GroupRules = conversation.GroupRules,
                 IsTemporary = conversation.IsTemporary,
                 ExpiresAt = conversation.ExpiresAt,
                 CanManage = conversation.IsGroup && string.Equals(conversation.AdminUserId, currentUserId, StringComparison.Ordinal),
@@ -312,11 +506,54 @@ namespace WhatsAppClone.API.Controllers
             }
         }
 
+        private async Task NotifyConversationUpdated(int conversationId, IEnumerable<string> participantIds)
+        {
+            foreach (var participantId in participantIds.Distinct(StringComparer.Ordinal))
+            {
+                var summary = await BuildConversationSummary(conversationId, participantId);
+                await _hubContext.Clients.User(participantId).SendAsync("ConversationUpdated", summary);
+            }
+        }
+
         private Task NotifyConversationDeleted(int conversationId, IEnumerable<string> participantIds)
         {
             return _hubContext.Clients.Users(participantIds.Distinct(StringComparer.Ordinal)).SendAsync(
                 "ConversationDeleted",
                 new { ConversationId = conversationId });
         }
+
+        private async Task AddUsersToConversationGroupAsync(int conversationId, IEnumerable<string> userIds)
+        {
+            foreach (var userId in userIds.Distinct(StringComparer.Ordinal))
+            {
+                foreach (var connectionId in ChatHub.GetConnectionIds(userId))
+                {
+                    await _hubContext.Groups.AddToGroupAsync(connectionId, conversationId.ToString());
+                }
+            }
+        }
+
+        private async Task RemoveUsersFromConversationGroupAsync(int conversationId, IEnumerable<string> userIds)
+        {
+            foreach (var userId in userIds.Distinct(StringComparer.Ordinal))
+            {
+                foreach (var connectionId in ChatHub.GetConnectionIds(userId))
+                {
+                    await _hubContext.Groups.RemoveFromGroupAsync(connectionId, conversationId.ToString());
+                }
+            }
+        }
+
+        private static string? NormalizeOptionalText(string? value)
+        {
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                return null;
+            }
+
+            return value.Trim();
+        }
     }
 }
+
+
