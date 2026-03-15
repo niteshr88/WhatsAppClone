@@ -19,6 +19,11 @@ export type Conversation = {
   id: number;
   isGroup: boolean;
   displayName: string;
+  groupName?: string | null;
+  adminUserId?: string | null;
+  isTemporary?: boolean;
+  expiresAt?: string | null;
+  canManage?: boolean;
   createdAt: string;
   lastMessageText?: string | null;
   lastMessageAt?: string | null;
@@ -73,6 +78,13 @@ export type ResetPasswordRequest = {
 
 export type RegisterRequest = LoginRequest & {
   displayName: string;
+};
+
+export type CreateGroupConversationRequest = {
+  participantIds: string[];
+  groupName: string;
+  isTemporary: boolean;
+  expiresInHours?: number;
 };
 
 export type UpdateProfileRequest = {

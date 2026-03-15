@@ -1,7 +1,7 @@
 using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Hosting;
 using WhatsAppClone.API.Data;
@@ -21,17 +21,20 @@ namespace WhatsAppClone.API.Controllers
         private readonly IHubContext<ChatHub> _hubContext;
         private readonly IWebHostEnvironment _environment;
         private readonly WebPushNotificationService _webPushNotificationService;
+        private readonly ConversationLifecycleService _conversationLifecycleService;
 
         public MessagesController(
             AppDbContext context,
             IHubContext<ChatHub> hubContext,
             IWebHostEnvironment environment,
-            WebPushNotificationService webPushNotificationService)
+            WebPushNotificationService webPushNotificationService,
+            ConversationLifecycleService conversationLifecycleService)
         {
             _context = context;
             _hubContext = hubContext;
             _environment = environment;
             _webPushNotificationService = webPushNotificationService;
+            _conversationLifecycleService = conversationLifecycleService;
         }
 
         [HttpGet("conversation/{conversationId:int}")]
@@ -44,11 +47,7 @@ namespace WhatsAppClone.API.Controllers
                 return Unauthorized();
             }
 
-            var isParticipant = await _context.ConversationParticipants
-                .AsNoTracking()
-                .AnyAsync(participant => participant.ConversationId == conversationId && participant.UserId == currentUserId);
-
-            if (!isParticipant)
+            if (!await _conversationLifecycleService.IsConversationAccessibleAsync(conversationId, currentUserId))
             {
                 return NotFound();
             }
@@ -94,11 +93,7 @@ namespace WhatsAppClone.API.Controllers
                 return Unauthorized();
             }
 
-            var isParticipant = await _context.ConversationParticipants
-                .AsNoTracking()
-                .AnyAsync(participant => participant.ConversationId == request.ConversationId && participant.UserId == currentUserId);
-
-            if (!isParticipant)
+            if (!await _conversationLifecycleService.IsConversationAccessibleAsync(request.ConversationId, currentUserId))
             {
                 return NotFound();
             }
@@ -258,11 +253,7 @@ namespace WhatsAppClone.API.Controllers
                 return Unauthorized();
             }
 
-            var isParticipant = await _context.ConversationParticipants
-                .AsNoTracking()
-                .AnyAsync(participant => participant.ConversationId == conversationId && participant.UserId == currentUserId);
-
-            if (!isParticipant)
+            if (!await _conversationLifecycleService.IsConversationAccessibleAsync(conversationId, currentUserId))
             {
                 return NotFound();
             }
@@ -322,11 +313,7 @@ namespace WhatsAppClone.API.Controllers
                 return BadRequest("Files must be 20 MB or smaller.");
             }
 
-            var isParticipant = await _context.ConversationParticipants
-                .AsNoTracking()
-                .AnyAsync(participant => participant.ConversationId == request.ConversationId && participant.UserId == currentUserId);
-
-            if (!isParticipant)
+            if (!await _conversationLifecycleService.IsConversationAccessibleAsync(request.ConversationId, currentUserId))
             {
                 return NotFound();
             }

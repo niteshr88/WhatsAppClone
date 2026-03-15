@@ -16,7 +16,9 @@ import {
   declineFriendRequest,
   createChatConnection,
   createConversation,
+  createGroupConversation,
   createMessage,
+  deleteConversation,
   deleteMessage,
   getConversations,
   getCurrentUser,
@@ -24,6 +26,7 @@ import {
   getWebPushPublicKey,
   getUsers,
   markConversationRead,
+  resolveMediaUrl,
   saveWebPushSubscription,
   sendFriendRequest,
   uploadMessageMedia,
@@ -102,6 +105,20 @@ type PendingOutgoingMediaMessage = {
   previewUrl?: string | null;
 };
 
+type ConversationDeletedPayload = {
+  conversationId: number;
+};
+
+type GroupExpiryUnit = "hours" | "days";
+
+type CreateGroupFormState = {
+  groupName: string;
+  participantIds: string[];
+  isTemporary: boolean;
+  expiresValue: string;
+  expiresUnit: GroupExpiryUnit;
+};
+
 const NOTIFICATION_PROMPT_STORAGE_KEY = "pulsechat.notifications.prompted";
 
 function getPendingQueueStorageKey(userId: string) {
@@ -162,6 +179,50 @@ function createProfileForm(user: AuthUser): UpdateProfileRequest {
   };
 }
 
+function createInitialGroupForm(): CreateGroupFormState {
+  return {
+    groupName: "",
+    participantIds: [],
+    isTemporary: false,
+    expiresValue: "24",
+    expiresUnit: "hours"
+  };
+}
+
+function getExpiresInHours(groupForm: CreateGroupFormState) {
+  if (!groupForm.isTemporary) {
+    return undefined;
+  }
+
+  const parsedValue = Number.parseInt(groupForm.expiresValue, 10);
+
+  if (!Number.isFinite(parsedValue) || parsedValue < 1) {
+    return Number.NaN;
+  }
+
+  return groupForm.expiresUnit === "days" ? parsedValue * 24 : parsedValue;
+}
+
+function formatGroupExpiry(expiresAt?: string | null) {
+  if (!expiresAt) {
+    return "Permanent group";
+  }
+
+  const diffMs = new Date(expiresAt).getTime() - Date.now();
+
+  if (diffMs <= 0) {
+    return "Expiring soon";
+  }
+
+  const totalHours = Math.ceil(diffMs / (1000 * 60 * 60));
+
+  if (totalHours >= 24) {
+    return `Expires in ${Math.ceil(totalHours / 24)}d`;
+  }
+
+  return `Expires in ${totalHours}h`;
+}
+
 function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [searchParams] = useSearchParams();
   const [currentUser, setCurrentUser] = useState<AuthUser>(session.user);
@@ -192,9 +253,13 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [profileForm, setProfileForm] = useState<UpdateProfileRequest>(() => createProfileForm(session.user));
   const [profileError, setProfileError] = useState("");
   const [profileStatus, setProfileStatus] = useState("");
+  const [isCreateGroupOpen, setIsCreateGroupOpen] = useState(false);
+  const [groupForm, setGroupForm] = useState<CreateGroupFormState>(() => createInitialGroupForm());
+  const [groupFormError, setGroupFormError] = useState("");
   const [isSending, startSendTransition] = useTransition();
   const [isUploadingMedia, startUploadTransition] = useTransition();
   const [isSavingProfile, startProfileTransition] = useTransition();
+  const [isCreatingGroup, startCreateGroupTransition] = useTransition();
   const connectionRef = useRef<HubConnection | null>(null);
   const joinedConversationIdsRef = useRef<Set<number>>(new Set());
   const messageStreamRef = useRef<HTMLDivElement | null>(null);
@@ -251,6 +316,14 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     () => visibleContacts.filter((contact) => contact.friendshipStatus !== "incoming" && contact.friendshipStatus !== "friends"),
     [visibleContacts]
   );
+  const groupConversations = useMemo(
+    () => sortConversations(conversations.filter((conversation) => conversation.isGroup)),
+    [conversations]
+  );
+  const groupCandidates = useMemo(
+    () => contacts.filter((contact) => contact.id !== currentUser.id),
+    [contacts, currentUser.id]
+  );
   const conversationByUserId = useMemo(() => {
     const lookup = new Map<string, Conversation>();
 
@@ -298,14 +371,15 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       const onlineCount = activeConversation.participants.filter(
         (participant) => participant.id !== currentUser.id && onlineUserIds.has(participant.id)
       ).length;
+      const groupStatus = activeConversation.isTemporary ? formatGroupExpiry(activeConversation.expiresAt) : "Permanent group";
 
       return {
         isOnline: onlineCount > 0,
         subtitle: activeTypingIndicator
           ? `${activeTypingIndicator.displayName} is typing...`
           : onlineCount
-            ? `${onlineCount} online`
-            : `${activeConversation.participants.length} participant${activeConversation.participants.length > 1 ? "s" : ""}`
+            ? `${onlineCount} online • ${groupStatus}`
+            : `${activeConversation.participants.length} participant${activeConversation.participants.length > 1 ? "s" : ""} • ${groupStatus}`
       };
     }
 
@@ -1238,6 +1312,11 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       setStatus(`Conversation ready with ${conversation.displayName}.`);
     });
 
+    connection.on("ConversationDeleted", ({ conversationId }: ConversationDeletedPayload) => {
+      removeConversationLocally(conversationId);
+      setStatus("Group removed.");
+    });
+
     connection.onreconnecting(() => {
       setConnectionState("reconnecting");
     });
@@ -1305,6 +1384,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       connection.off("PresenceChanged");
       connection.off("FriendshipChanged");
       connection.off("ConversationCreated");
+      connection.off("ConversationDeleted");
 
       if (connectionRef.current === connection) {
         connectionRef.current = null;
@@ -1425,6 +1505,128 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       behavior: "smooth"
     });
   }, [activeConversationId, messages]);
+
+  function removeConversationLocally(conversationId: number) {
+    setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
+    setMessagesByConversation((current) => {
+      if (!(conversationId in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+    setUnreadCounts((current) => {
+      if (!(conversationId in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+    setTypingByConversation((current) => {
+      if (!(conversationId in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+    setActiveConversationId((current) => (current === conversationId ? null : current));
+  }
+
+  function handleSelectConversation(conversationId: number) {
+    const selectedConversation = conversations.find((conversation) => conversation.id === conversationId);
+    setActiveConversationId(conversationId);
+
+    if (selectedConversation) {
+      setStatus(`Opened ${selectedConversation.displayName}.`);
+    }
+  }
+
+  function openCreateGroupModal() {
+    setSidebarView("friends");
+    setIsCreateGroupOpen(true);
+    setGroupForm(createInitialGroupForm());
+    setGroupFormError("");
+  }
+
+  function closeCreateGroupModal() {
+    setIsCreateGroupOpen(false);
+    setGroupForm(createInitialGroupForm());
+    setGroupFormError("");
+  }
+
+  function handleToggleGroupParticipant(participantId: string) {
+    setGroupForm((current) => ({
+      ...current,
+      participantIds: current.participantIds.includes(participantId)
+        ? current.participantIds.filter((id) => id !== participantId)
+        : [...current.participantIds, participantId]
+    }));
+  }
+
+  function handleGroupFormChange(field: keyof CreateGroupFormState, value: string | boolean) {
+    setGroupForm((current) => ({
+      ...current,
+      [field]: value
+    } as CreateGroupFormState));
+  }
+
+  async function handleCreateGroupConversation(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    setGroupFormError("");
+
+    const trimmedGroupName = groupForm.groupName.trim();
+
+    if (!trimmedGroupName) {
+      setGroupFormError("Group name is required.");
+      return;
+    }
+
+    if (groupForm.participantIds.length < 2) {
+      setGroupFormError("Select at least two people for a group chat.");
+      return;
+    }
+
+    const expiresInHours = getExpiresInHours(groupForm);
+
+    if (groupForm.isTemporary && (!Number.isFinite(expiresInHours) || !expiresInHours)) {
+      setGroupFormError("Enter a valid expiry in hours or days.");
+      return;
+    }
+
+    startCreateGroupTransition(async () => {
+      try {
+        const conversation = await createGroupConversation(session.token, {
+          participantIds: groupForm.participantIds,
+          groupName: trimmedGroupName,
+          isTemporary: groupForm.isTemporary,
+          expiresInHours
+        });
+
+        setConversations((current) => upsertConversation(current, conversation));
+        setActiveConversationId(conversation.id);
+        setStatus(`Group room ${conversation.displayName} created.`);
+        closeCreateGroupModal();
+      } catch (caughtError) {
+        setGroupFormError(caughtError instanceof Error ? caughtError.message : "Unable to create group room.");
+      }
+    });
+  }
+
+  async function handleDeleteConversation() {
+    if (!activeConversation?.isGroup) {
+      return;
+    }
+
+    await deleteConversation(session.token, activeConversation.id);
+    removeConversationLocally(activeConversation.id);
+    setStatus(`${activeConversation.displayName} deleted.`);
+  }
 
   async function handleSelectContact(contact: AuthUser) {
     try {
@@ -1602,6 +1804,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   }
 
   function openProfilePanel(editMode = false) {
+    setIsCreateGroupOpen(false);
     setSidebarView("profile");
     setProfileError("");
     setProfileStatus("");
@@ -1610,16 +1813,19 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   }
 
   function handleShowFriends() {
+    setIsCreateGroupOpen(false);
     setSidebarView("friends");
     setIsEditingProfile(false);
   }
 
   function handleShowRequests() {
+    setIsCreateGroupOpen(false);
     setSidebarView("requests");
     setIsEditingProfile(false);
   }
 
   function handleShowDiscover() {
+    setIsCreateGroupOpen(false);
     setSidebarView("discover");
     setIsEditingProfile(false);
   }
@@ -1679,7 +1885,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   return (
     <main className="workspace-shell">
       <section className={`workspace-frame ${activeConversation ? "mobile-chat-open" : "mobile-sidebar-open"}`}>
-        <aside className="sidebar-shell">
+        <aside className={`sidebar-shell ${sidebarView === "profile" ? "profile-open" : ""}`}>
           <SidebarRail
             currentUser={currentUser}
             sidebarView={sidebarView}
@@ -1703,11 +1909,14 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
                 incomingRequestContacts={incomingRequestContacts}
                 friendContacts={friendContacts}
                 discoverContacts={discoverContacts}
+                groupConversations={groupConversations}
                 conversationByUserId={conversationByUserId}
                 activeConversationId={activeConversationId}
                 unreadCounts={unreadCounts}
                 onlineUserIds={onlineUserIds}
                 onSelectContact={handleSelectContact}
+                onSelectConversation={handleSelectConversation}
+                onOpenCreateGroup={openCreateGroupModal}
                 onAcceptFriendRequest={handleAcceptFriendRequest}
                 onDeclineFriendRequest={handleDeclineFriendRequest}
                 onSendFriendRequest={handleSendFriendRequest}
@@ -1748,15 +1957,156 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
           onUploadMedia={handleUploadMedia}
           onUpdateMessage={handleUpdateMessage}
           onDeleteMessage={handleDeleteMessage}
+          onDeleteConversation={handleDeleteConversation}
           onRetryMessage={handleRetryMessage}
           onSendFriendRequest={handleSendFriendRequest}
           onAcceptFriendRequest={handleAcceptFriendRequest}
           onDeclineFriendRequest={handleDeclineFriendRequest}
           onMobileBack={() => setActiveConversationId(null)}
         />
+
+        {isCreateGroupOpen ? (
+          <div className="group-modal-backdrop" role="presentation" onClick={closeCreateGroupModal}>
+            <div
+              aria-labelledby="group-modal-title"
+              aria-modal="true"
+              className="group-modal"
+              role="dialog"
+              onClick={(event) => event.stopPropagation()}
+            >
+              <div className="group-modal-header">
+                <div>
+                  <p className="eyebrow">Group room</p>
+                  <h3 id="group-modal-title">Create a new group</h3>
+                </div>
+                <button className="ghost-button" type="button" onClick={closeCreateGroupModal}>
+                  Close
+                </button>
+              </div>
+
+              <form className="group-modal-form" onSubmit={handleCreateGroupConversation}>
+                <label>
+                  <span>Group name</span>
+                  <input
+                    maxLength={60}
+                    placeholder="Weekend squad"
+                    required
+                    value={groupForm.groupName}
+                    onChange={(event) => handleGroupFormChange("groupName", event.target.value)}
+                  />
+                </label>
+
+                <div className="group-modal-options">
+                  <label className="group-toggle-row">
+                    <input
+                      checked={groupForm.isTemporary}
+                      type="checkbox"
+                      onChange={(event) => handleGroupFormChange("isTemporary", event.target.checked)}
+                    />
+                    <span>
+                      <strong>Temporary room</strong>
+                      <small>Auto-delete after the admin-chosen time.</small>
+                    </span>
+                  </label>
+
+                  {groupForm.isTemporary ? (
+                    <div className="group-expiry-row">
+                      <label>
+                        <span>Delete after</span>
+                        <input
+                          inputMode="numeric"
+                          placeholder="24"
+                          value={groupForm.expiresValue}
+                          onChange={(event) => handleGroupFormChange("expiresValue", event.target.value)}
+                        />
+                      </label>
+                      <label>
+                        <span>Unit</span>
+                        <select
+                          value={groupForm.expiresUnit}
+                          onChange={(event) => handleGroupFormChange("expiresUnit", event.target.value as GroupExpiryUnit)}
+                        >
+                          <option value="hours">Hours</option>
+                          <option value="days">Days</option>
+                        </select>
+                      </label>
+                    </div>
+                  ) : (
+                    <p className="group-modal-helper">Permanent groups stay until the admin deletes them.</p>
+                  )}
+                </div>
+
+                <div className="group-modal-members">
+                  <div className="section-heading inner">
+                    <span>Choose people</span>
+                    <span>{groupForm.participantIds.length} selected</span>
+                  </div>
+                  <div className="group-member-list">
+                    {groupCandidates.map((contact) => {
+                      const isSelected = groupForm.participantIds.includes(contact.id);
+                      const isOnline = onlineUserIds.has(contact.id);
+                      const profileImageUrl = resolveMediaUrl(contact.profileImageUrl);
+
+                      return (
+                        <label key={contact.id} className={`group-member-card ${isSelected ? "selected" : ""}`}>
+                          <input checked={isSelected} type="checkbox" onChange={() => handleToggleGroupParticipant(contact.id)} />
+                          <span className={`avatar-badge ${isOnline ? "live" : ""}`}>
+                            {profileImageUrl ? (
+                              <img alt={contact.displayName} className="avatar-image" src={profileImageUrl} />
+                            ) : (
+                              contact.displayName
+                                .split(" ")
+                                .map((part) => part[0])
+                                .join("")
+                                .slice(0, 2)
+                                .toUpperCase()
+                            )}
+                            <span className={`presence-dot ${isOnline ? "online" : ""}`} />
+                          </span>
+                          <span className="group-member-copy">
+                            <strong>{contact.displayName}</strong>
+                            <small>{contact.email}</small>
+                          </span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </div>
+
+                {groupFormError ? <p className="status-banner error">{groupFormError}</p> : null}
+
+                <div className="group-modal-actions">
+                  <button className="ghost-button" type="button" onClick={closeCreateGroupModal}>
+                    Cancel
+                  </button>
+                  <button className="primary-button" disabled={isCreatingGroup} type="submit">
+                    {isCreatingGroup ? "Creating..." : "Create group"}
+                  </button>
+                </div>
+              </form>
+            </div>
+          </div>
+        ) : null}
       </section>
     </main>
   );
 }
 
 export default ChatView;
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

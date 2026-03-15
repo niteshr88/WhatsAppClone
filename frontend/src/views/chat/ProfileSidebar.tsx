@@ -18,6 +18,37 @@ type ProfileSidebarProps = {
   onSaveProfile: (event: FormEvent<HTMLFormElement>) => void;
 };
 
+function ProfileImageEditIcon({ className }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" className={className} viewBox="0 0 24 24">
+      <path
+        d="M9 18h6.8a2.2 2.2 0 0 0 2.2-2.2V9.4a2.2 2.2 0 0 0-2.2-2.2h-2l-1-1.6H11.2l-1 1.6h-2A2.2 2.2 0 0 0 6 9.4v6.4A2.2 2.2 0 0 0 8.2 18H9Z"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.8"
+      />
+      <circle cx="12" cy="12.2" r="3.2" fill="none" stroke="currentColor" strokeWidth="1.8" />
+    </svg>
+  );
+}
+
+function ProfileBackIcon({ className }: { className?: string }) {
+  return (
+    <svg aria-hidden="true" className={className} viewBox="0 0 20 20">
+      <path
+        d="M12.5 4.5 7 10l5.5 5.5"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.9"
+      />
+    </svg>
+  );
+}
+
 function ProfileSidebar({
   currentUser,
   isEditingProfile,
@@ -41,7 +72,6 @@ function ProfileSidebar({
       <header className="sidebar-profile-header">
         <div>
           <p className="eyebrow">Profile</p>
-          <h2>{currentUser.displayName}</h2>
         </div>
         <div className="sidebar-top-actions">
           {!isEditingProfile ? (
@@ -49,14 +79,22 @@ function ProfileSidebar({
               Edit
             </button>
           ) : null}
-          <button className="ghost-button" type="button" onClick={onShowPeople}>
-            People
+          <button aria-label="Back to people" className="ghost-button profile-back-button" type="button" onClick={onShowPeople}>
+            <ProfileBackIcon className="profile-back-icon" />
           </button>
         </div>
       </header>
 
-      <div className="sidebar-profile-preview">
-        {previewImage ? <img alt={currentUser.displayName} src={previewImage} /> : <span>{initials(previewName)}</span>}
+      <div className="sidebar-profile-preview-shell">
+        <div className="sidebar-profile-preview">
+          {previewImage ? <img alt={currentUser.displayName} src={previewImage} /> : <span>{initials(previewName)}</span>}
+        </div>
+        {isEditingProfile ? (
+          <label className="sidebar-profile-image-trigger">
+            <input accept="image/*" className="sidebar-profile-image-input" onChange={onProfileImageUpload} type="file" />
+            <ProfileImageEditIcon className="sidebar-profile-image-icon" />
+          </label>
+        ) : null}
       </div>
 
       {isEditingProfile ? (
@@ -78,18 +116,6 @@ function ProfileSidebar({
               onChange={(event) => onProfileFieldChange("bio", event.target.value)}
               placeholder="One line about you"
             />
-          </label>
-          <label>
-            <span>Profile image URL</span>
-            <input
-              value={profileForm.profileImageUrl ?? ""}
-              onChange={(event) => onProfileFieldChange("profileImageUrl", event.target.value)}
-              placeholder="https://example.com/avatar.jpg"
-            />
-          </label>
-          <label>
-            <span>Upload image</span>
-            <input accept="image/*" onChange={onProfileImageUpload} type="file" />
           </label>
           {profileError ? <p className="status-banner error">{profileError}</p> : null}
           {profileStatus ? <p className="status-banner">{profileStatus}</p> : null}

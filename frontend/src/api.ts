@@ -2,6 +2,7 @@ import { HubConnectionBuilder, HubConnectionState, LogLevel } from "@microsoft/s
 import type {
   AuthUser,
   Conversation,
+  CreateGroupConversationRequest,
   ForgotPasswordRequest,
   ForgotPasswordResponse,
   LoginRequest,
@@ -133,6 +134,14 @@ export function getConversations(token: string) {
 
 export function createConversation(token: string, participantIds: string[]) {
   return request<Conversation>("/api/Conversations", "POST", token, { participantIds });
+}
+
+export function createGroupConversation(token: string, payload: CreateGroupConversationRequest) {
+  return request<Conversation>("/api/Conversations", "POST", token, payload);
+}
+
+export function deleteConversation(token: string, conversationId: number) {
+  return request<void>(`/api/Conversations/${conversationId}`, "DELETE", token);
 }
 
 export function getMessages(token: string, conversationId: number) {

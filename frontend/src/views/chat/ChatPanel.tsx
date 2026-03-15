@@ -24,6 +24,7 @@ type ChatPanelProps = {
   onUploadMedia: (file: File) => void | Promise<void>;
   onUpdateMessage: (messageId: number, text: string) => Promise<void>;
   onDeleteMessage: (messageId: number) => Promise<void>;
+  onDeleteConversation?: () => void | Promise<void>;
   onRetryMessage: (clientMessageId: string) => void | Promise<void>;
   onSendFriendRequest: (recipientId: string) => void | Promise<void>;
   onAcceptFriendRequest: (requestId: number) => void | Promise<void>;
@@ -214,6 +215,7 @@ function ChatPanel({
   onUploadMedia,
   onUpdateMessage,
   onDeleteMessage,
+  onDeleteConversation,
   onRetryMessage,
   onSendFriendRequest,
   onAcceptFriendRequest,
@@ -355,6 +357,23 @@ function ChatPanel({
   }
 
 
+  async function handleDeleteConversationClick() {
+    if (!activeConversation || !onDeleteConversation) {
+      return;
+    }
+
+    if (!window.confirm(`Delete ${activeConversation.displayName}? This will remove the group for everyone.`)) {
+      return;
+    }
+
+    try {
+      setMessageActionError("");
+      await onDeleteConversation();
+      setIsHeaderMenuOpen(false);
+    } catch (caughtError) {
+      setMessageActionError(caughtError instanceof Error ? caughtError.message : "Unable to delete group.");
+    }
+  }
   function closeHeaderMenu() {
     setIsHeaderMenuOpen(false);
   }
@@ -475,6 +494,14 @@ function ChatPanel({
                 <button className="chat-header-menu-item" type="button" onClick={closeHeaderMenu}>
                   Info
                 </button>
+                {activeConversation?.isGroup ? (
+                  <>
+                    <div className="chat-header-menu-divider" />
+                    <button className="chat-header-menu-item danger" type="button" onClick={() => void handleDeleteConversationClick()}>
+                      Delete group
+                    </button>
+                  </>
+                ) : null}
               </div>
             ) : null}
           </div>
@@ -497,6 +524,34 @@ function ChatPanel({
               const canEditMessage = !message.mediaUrl;
               const isSendingLocally = message.localStatus === "sending";
               const isFailedLocally = message.localStatus === "failed";
+              const shouldInlineMeta = Boolean(message.text && !isImage && !hasFileAttachment && !isDeleted);
+              const metaContent = (
+                <>
+                  {message.deletedAt ? <span className="message-badge">Deleted</span> : null}
+                  {message.editedAt && !message.deletedAt ? <span className="message-badge">Edited</span> : null}
+                  {isFailedLocally ? <span className="message-badge failed">Failed</span> : null}
+                  <time>{formatMessageTime(message.sentAt)}</time>
+                  {mine && isSendingLocally ? (
+                    <span className="message-status pending" title="Sending">
+                      <PendingClockIcon className="message-pending-icon" />
+                    </span>
+                  ) : null}
+                  {mine && isFailedLocally ? (
+                    <span className="message-status failed" title="Failed to send">
+                      <FailedMessageIcon className="message-failed-icon" />
+                    </span>
+                  ) : null}
+                  {mine && !isSendingLocally && !isFailedLocally ? (
+                    <span
+                      className={`message-status ${message.readAt ? "read" : message.deliveredAt ? "delivered" : "sent"}`}
+                      title={message.readAt ? "Seen" : message.deliveredAt ? "Delivered" : "Sent"}
+                    >
+                      <MessageTickIcon className="message-tick" />
+                      {message.deliveredAt || message.readAt ? <MessageTickIcon className="message-tick overlap" /> : null}
+                    </span>
+                  ) : null}
+                </>
+              );
 
               return (
                 <article key={message.id} className={`message-row ${mine ? "mine" : ""}`}>
@@ -562,7 +617,16 @@ function ChatPanel({
                             </div>
                           )
                         ) : null}
-                        {message.text ? <p>{message.text}</p> : null}
+                        {message.text ? (
+                          shouldInlineMeta ? (
+                            <div className="message-inline-copy">
+                              <span className="message-inline-text">{message.text}</span>
+                              <span className="message-inline-meta">{metaContent}</span>
+                            </div>
+                          ) : (
+                            <p>{message.text}</p>
+                          )
+                        ) : null}
                       </>
                     )}
                     {mine && !isEditing && canShowMessageMenu ? (
@@ -614,31 +678,7 @@ function ChatPanel({
                         ) : null}
                       </div>
                     ) : null}
-                    <div className="message-meta">
-                      {message.deletedAt ? <span className="message-badge">Deleted</span> : null}
-                      {message.editedAt && !message.deletedAt ? <span className="message-badge">Edited</span> : null}
-                      {isFailedLocally ? <span className="message-badge failed">Failed</span> : null}
-                      <time>{formatMessageTime(message.sentAt)}</time>
-                      {mine && isSendingLocally ? (
-                        <span className="message-status pending" title="Sending">
-                          <PendingClockIcon className="message-pending-icon" />
-                        </span>
-                      ) : null}
-                      {mine && isFailedLocally ? (
-                        <span className="message-status failed" title="Failed to send">
-                          <FailedMessageIcon className="message-failed-icon" />
-                        </span>
-                      ) : null}
-                      {mine && !isSendingLocally && !isFailedLocally ? (
-                        <span
-                          className={`message-status ${message.readAt ? "read" : message.deliveredAt ? "delivered" : "sent"}`}
-                          title={message.readAt ? "Seen" : message.deliveredAt ? "Delivered" : "Sent"}
-                        >
-                          <MessageTickIcon className="message-tick" />
-                          {message.deliveredAt || message.readAt ? <MessageTickIcon className="message-tick overlap" /> : null}
-                        </span>
-                      ) : null}
-                    </div>
+                    {!shouldInlineMeta ? <div className="message-meta">{metaContent}</div> : null}
                     {mine && isFailedLocally && message.clientMessageId ? (
                       <div className="message-retry-row">
                         <button
@@ -873,3 +913,10 @@ function ChatPanel({
 }
 
 export default ChatPanel;
+
+
+
+
+
+
+

@@ -1,4 +1,3 @@
-
 using System.Text;
 using System.Text.Json.Serialization;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -29,32 +28,6 @@ namespace WhatsAppClone.API
             builder.Services.AddSwaggerGen();
             builder.Services.AddSignalR();
 
-            //builder.Services.AddCors(options =>
-            //{
-            //    options.AddPolicy("Frontend", policy =>
-            //    {
-            //        policy
-            //            .SetIsOriginAllowed(origin =>
-            //            {
-            //                if (string.IsNullOrWhiteSpace(origin))
-            //                {
-            //                    return false;
-            //                }
-
-            //                if (!Uri.TryCreate(origin, UriKind.Absolute, out var uri))
-            //                {
-            //                    return false;
-            //                }
-
-            //                return uri.Host.Equals("localhost", StringComparison.OrdinalIgnoreCase) ||
-            //                       uri.Host.Equals("127.0.0.1", StringComparison.OrdinalIgnoreCase);
-            //            })
-            //            .AllowAnyHeader()
-            //            .AllowAnyMethod()
-            //            .AllowCredentials();
-            //    });
-            //});
-
             builder.Services.AddCors(options =>
             {
                 options.AddPolicy("Frontend", policy =>
@@ -71,17 +44,6 @@ namespace WhatsAppClone.API
 
             builder.Services.AddDbContext<AppDbContext>(options =>
                 options.UseSqlServer(builder.Configuration.GetConnectionString("DefaultConnection")));
-
-            //        builder.Services.AddDbContext<AppDbContext>(options =>
-            //options.UseSqlServer(
-            //    builder.Configuration.GetConnectionString("DefaultConnection"),
-            //    sqlOptions =>
-            //    {
-            //        sqlOptions.EnableRetryOnFailure(
-            //            maxRetryCount: 5,
-            //            maxRetryDelay: TimeSpan.FromSeconds(10),
-            //            errorNumbersToAdd: null);
-            //    }));
 
             builder.Services.AddIdentity<ApplicationUser, IdentityRole>()
                 .AddEntityFrameworkStores<AppDbContext>()
@@ -124,6 +86,7 @@ namespace WhatsAppClone.API
                 });
 
             builder.Services.AddScoped<JwtService>();
+            builder.Services.AddScoped<ConversationLifecycleService>();
             builder.Services.AddSingleton<WebPushVapidKeyStore>();
             builder.Services.AddScoped<WebPushNotificationService>();
 
@@ -135,12 +98,26 @@ namespace WhatsAppClone.API
             using (var scope = app.Services.CreateScope())
             {
                 var dbContext = scope.ServiceProvider.GetRequiredService<AppDbContext>();
-                //dbContext.Database.Migrate();
 
                 if (dbContext.Database.IsSqlServer())
                 {
                     dbContext.Database.ExecuteSqlRaw(
                         """
+                        IF OBJECT_ID(N'[dbo].[Conversations]', 'U') IS NOT NULL
+                        BEGIN
+                            IF COL_LENGTH('Conversations', 'Name') IS NULL
+                                ALTER TABLE [dbo].[Conversations] ADD [Name] nvarchar(200) NULL;
+
+                            IF COL_LENGTH('Conversations', 'AdminUserId') IS NULL
+                                ALTER TABLE [dbo].[Conversations] ADD [AdminUserId] nvarchar(450) NULL;
+
+                            IF COL_LENGTH('Conversations', 'IsTemporary') IS NULL
+                                ALTER TABLE [dbo].[Conversations] ADD [IsTemporary] bit NOT NULL CONSTRAINT [DF_Conversations_IsTemporary] DEFAULT(0);
+
+                            IF COL_LENGTH('Conversations', 'ExpiresAt') IS NULL
+                                ALTER TABLE [dbo].[Conversations] ADD [ExpiresAt] datetime2 NULL;
+                        END
+
                         IF OBJECT_ID(N'[dbo].[Messages]', 'U') IS NOT NULL
                         BEGIN
                             IF COL_LENGTH('Messages', 'DeliveredAt') IS NULL
@@ -213,16 +190,14 @@ namespace WhatsAppClone.API
                 }
             }
 
-            //if (app.Environment.IsDevelopment())
-            //{
-                app.UseSwagger();
-                app.UseSwaggerUI();
-            //}
+            app.UseSwagger();
+            app.UseSwaggerUI();
 
             if (!app.Environment.IsDevelopment())
             {
                 app.UseHttpsRedirection();
             }
+
             app.UseStaticFiles();
             app.UseCors("Frontend");
             app.UseAuthentication();

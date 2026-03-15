@@ -5,6 +5,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.EntityFrameworkCore;
 using WhatsAppClone.API.Data;
 using WhatsAppClone.API.Models;
+using WhatsAppClone.API.Services;
 
 namespace WhatsAppClone.API.Hubs
 {
@@ -13,10 +14,12 @@ namespace WhatsAppClone.API.Hubs
     {
         private static readonly ConcurrentDictionary<string, ConcurrentDictionary<string, byte>> UserConnections = new();
         private readonly AppDbContext _context;
+        private readonly ConversationLifecycleService _conversationLifecycleService;
 
-        public ChatHub(AppDbContext context)
+        public ChatHub(AppDbContext context, ConversationLifecycleService conversationLifecycleService)
         {
             _context = context;
+            _conversationLifecycleService = conversationLifecycleService;
         }
 
         public static bool IsUserOnline(string userId)
@@ -29,10 +32,13 @@ namespace WhatsAppClone.API.Hubs
             var userId = GetCurrentUserId();
             var connections = UserConnections.GetOrAdd(userId, _ => new ConcurrentDictionary<string, byte>());
             var isFirstConnection = connections.TryAdd(Context.ConnectionId, 0) && connections.Count == 1;
-            var conversationIds = await _context.ConversationParticipants
+
+            await _conversationLifecycleService.CleanupExpiredConversationsAsync();
+
+            var conversationIds = await _conversationLifecycleService.ActiveConversationsQuery()
                 .AsNoTracking()
-                .Where(participant => participant.UserId == userId)
-                .Select(participant => participant.ConversationId)
+                .Where(conversation => conversation.Participants.Any(participant => participant.UserId == userId))
+                .Select(conversation => conversation.Id)
                 .ToListAsync();
 
             await Clients.Caller.SendAsync("PresenceSnapshot", UserConnections.Keys.ToArray());
@@ -292,11 +298,9 @@ namespace WhatsAppClone.API.Hubs
 
         private async Task EnsureConversationParticipant(int conversationId, string userId)
         {
-            var isParticipant = await _context.ConversationParticipants
-                .AsNoTracking()
-                .AnyAsync(participant => participant.ConversationId == conversationId && participant.UserId == userId);
+            var isAccessible = await _conversationLifecycleService.IsConversationAccessibleAsync(conversationId, userId);
 
-            if (!isParticipant)
+            if (!isAccessible)
             {
                 throw new HubException("You are not a participant in this conversation.");
             }
