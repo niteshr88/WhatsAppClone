@@ -64,7 +64,10 @@ import { deletePendingMediaBlob, getPendingMediaBlob, savePendingMediaBlob } fro
 import ChatPanel from "./chat/ChatPanel";
 import PeopleSidebar from "./chat/PeopleSidebar";
 import ProfileSidebar from "./chat/ProfileSidebar";
+import ProfileSettingsPanel from "./chat/ProfileSettingsPanel";
+import SettingsSidebar from "./chat/SettingsSidebar";
 import SidebarRail from "./chat/SidebarRail";
+import ChatSettingsPanel, { type ChatThemePreference, type ChatWallpaperPreference } from "./chat/ChatSettingsPanel";
 import GroupSettingsModal from "./chat/GroupSettingsModal";
 
 
@@ -126,6 +129,8 @@ type CreateGroupFormState = {
 };
 
 const NOTIFICATION_PROMPT_STORAGE_KEY = "pulsechat.notifications.prompted";
+const CHAT_THEME_STORAGE_KEY = "sandesaa.chat.theme";
+const CHAT_WALLPAPER_STORAGE_KEY = "sandesaa.chat.wallpaper";
 
 function getPendingQueueStorageKey(userId: string) {
   return `pulsechat.pending.${userId}`;
@@ -181,7 +186,9 @@ function createProfileForm(user: AuthUser): UpdateProfileRequest {
   return {
     displayName: user.displayName,
     profileImageUrl: user.profileImageUrl ?? "",
-    bio: user.bio ?? ""
+    bio: user.bio ?? "",
+    chatThemePreference: user.chatThemePreference ?? "system",
+    chatWallpaperPreference: user.chatWallpaperPreference ?? "default"
   };
 }
 
@@ -193,6 +200,26 @@ function createInitialGroupForm(): CreateGroupFormState {
     expiresValue: "24",
     expiresUnit: "hours"
   };
+}
+
+function loadStoredChatThemePreference(): ChatThemePreference {
+  if (typeof window === "undefined") {
+    return "system";
+  }
+
+  const storedValue = window.localStorage.getItem(CHAT_THEME_STORAGE_KEY);
+  return storedValue === "light" || storedValue === "dark" || storedValue === "system" ? storedValue : "system";
+}
+
+function loadStoredChatWallpaperPreference(): ChatWallpaperPreference {
+  if (typeof window === "undefined") {
+    return "default";
+  }
+
+  const storedValue = window.localStorage.getItem(CHAT_WALLPAPER_STORAGE_KEY);
+  return storedValue === "mist" || storedValue === "mint" || storedValue === "lavender" || storedValue === "sunset" || storedValue === "midnight" || storedValue === "default"
+    ? storedValue
+    : "default";
 }
 
 function createGroupSettingsForm(conversation: Conversation): UpdateGroupSettingsRequest {
@@ -262,7 +289,23 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [onlineUserIds, setOnlineUserIds] = useState<Set<string>>(() => new Set());
   const [typingByConversation, setTypingByConversation] = useState<Record<number, { userId: string; displayName: string }>>({});
   const [unreadCounts, setUnreadCounts] = useState<Record<number, number>>({});
-  const [sidebarView, setSidebarView] = useState<"friends" | "requests" | "discover" | "profile">("friends");
+  const [sidebarView, setSidebarView] = useState<"friends" | "requests" | "discover" | "profile" | "settings">("friends");
+  const [settingsScreen, setSettingsScreen] = useState<"home" | "profile" | "chats">("home");
+  const [settingsSearch, setSettingsSearch] = useState("");
+  const [chatThemePreference, setChatThemePreference] = useState<ChatThemePreference>(() => session.user.chatThemePreference ?? loadStoredChatThemePreference());
+  const [chatWallpaperPreference, setChatWallpaperPreference] = useState<ChatWallpaperPreference>(() => session.user.chatWallpaperPreference ?? loadStoredChatWallpaperPreference());
+  const [chatThemeDraft, setChatThemeDraft] = useState<ChatThemePreference>(() => session.user.chatThemePreference ?? loadStoredChatThemePreference());
+  const [chatWallpaperDraft, setChatWallpaperDraft] = useState<ChatWallpaperPreference>(() => session.user.chatWallpaperPreference ?? loadStoredChatWallpaperPreference());
+  const [isThemeDialogOpen, setIsThemeDialogOpen] = useState(false);
+  const [chatSettingsError, setChatSettingsError] = useState("");
+  const [chatSettingsStatus, setChatSettingsStatus] = useState("");
+  const [systemChatTheme, setSystemChatTheme] = useState<"light" | "dark">(() => {
+    if (typeof window === "undefined") {
+      return "light";
+    }
+
+    return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
+  });
   const [isEditingProfile, setIsEditingProfile] = useState(false);
   const [profileForm, setProfileForm] = useState<UpdateProfileRequest>(() => createProfileForm(session.user));
   const [profileError, setProfileError] = useState("");
@@ -280,6 +323,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [isSavingProfile, startProfileTransition] = useTransition();
   const [isCreatingGroup, startCreateGroupTransition] = useTransition();
   const [isSavingGroupSettings, startGroupSettingsTransition] = useTransition();
+  const [isSavingChatSettings, startChatSettingsTransition] = useTransition();
   const connectionRef = useRef<HubConnection | null>(null);
   const joinedConversationIdsRef = useRef<Set<number>>(new Set());
   const messageStreamRef = useRef<HTMLDivElement | null>(null);
@@ -420,6 +464,9 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     activeGroupConversation &&
     (activeGroupConversation.canManage || activeGroupConversation.adminUserId === currentUser.id)
   );
+  const effectiveThemePreference = settingsScreen === "chats" ? chatThemeDraft : chatThemePreference;
+  const effectiveWallpaperPreference = settingsScreen === "chats" ? chatWallpaperDraft : chatWallpaperPreference;
+  const appliedChatTheme = effectiveThemePreference === "system" ? systemChatTheme : effectiveThemePreference;
   const availableGroupContacts = useMemo(
     () =>
       activeGroupConversation
@@ -480,7 +527,53 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
 
   useEffect(() => {
     setProfileForm(createProfileForm(currentUser));
+    const nextThemePreference = currentUser.chatThemePreference ?? loadStoredChatThemePreference();
+    const nextWallpaperPreference = currentUser.chatWallpaperPreference ?? loadStoredChatWallpaperPreference();
+    setChatThemePreference(nextThemePreference);
+    setChatWallpaperPreference(nextWallpaperPreference);
+    setChatThemeDraft(nextThemePreference);
+    setChatWallpaperDraft(nextWallpaperPreference);
   }, [currentUser]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return undefined;
+    }
+
+    const mediaQuery = window.matchMedia("(prefers-color-scheme: dark)");
+    const updateTheme = (matches: boolean) => {
+      setSystemChatTheme(matches ? "dark" : "light");
+    };
+    const handleThemeChange = (event: MediaQueryListEvent) => {
+      updateTheme(event.matches);
+    };
+
+    updateTheme(mediaQuery.matches);
+
+    if (typeof mediaQuery.addEventListener === "function") {
+      mediaQuery.addEventListener("change", handleThemeChange);
+      return () => mediaQuery.removeEventListener("change", handleThemeChange);
+    }
+
+    mediaQuery.addListener(handleThemeChange);
+    return () => mediaQuery.removeListener(handleThemeChange);
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(CHAT_THEME_STORAGE_KEY, chatThemePreference);
+  }, [chatThemePreference]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.localStorage.setItem(CHAT_WALLPAPER_STORAGE_KEY, chatWallpaperPreference);
+  }, [chatWallpaperPreference]);
 
   useEffect(() => {
     if (!isGroupSettingsOpen) {
@@ -2024,6 +2117,42 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     setIsEditingProfile(false);
   }
 
+  function openSettingsHome() {
+    setIsCreateGroupOpen(false);
+    setSidebarView("settings");
+    setSettingsScreen("home");
+    setSettingsSearch("");
+    setProfileError("");
+    setProfileStatus("");
+    setChatSettingsError("");
+    setChatSettingsStatus("");
+    setIsThemeDialogOpen(false);
+    setChatThemeDraft(chatThemePreference);
+    setChatWallpaperDraft(chatWallpaperPreference);
+  }
+
+  function openSettingsProfile() {
+    setIsCreateGroupOpen(false);
+    setSidebarView("settings");
+    setSettingsScreen("profile");
+    setProfileError("");
+    setProfileStatus("");
+    setProfileForm(createProfileForm(currentUser));
+    setChatSettingsError("");
+    setChatSettingsStatus("");
+  }
+
+  function openChatSettings() {
+    setIsCreateGroupOpen(false);
+    setSidebarView("settings");
+    setSettingsScreen("chats");
+    setChatSettingsError("");
+    setChatSettingsStatus("");
+    setIsThemeDialogOpen(false);
+    setChatThemeDraft(chatThemePreference);
+    setChatWallpaperDraft(chatWallpaperPreference);
+  }
+
   function handleProfileFieldChange(field: keyof UpdateProfileRequest, value: string) {
     setProfileForm((current) => ({
       ...current,
@@ -2036,6 +2165,8 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     setProfileError("");
     setProfileStatus("");
     setProfileForm(createProfileForm(currentUser));
+    setChatSettingsError("");
+    setChatSettingsStatus("");
   }
 
   function handleProfileImageUpload(event: ChangeEvent<HTMLInputElement>) {
@@ -2055,6 +2186,56 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     reader.readAsDataURL(file);
   }
 
+  function handleOpenThemeDialog() {
+    setChatThemeDraft(chatThemePreference);
+    setIsThemeDialogOpen(true);
+  }
+
+  function handleCloseThemeDialog() {
+    setChatThemeDraft(chatThemePreference);
+    setIsThemeDialogOpen(false);
+  }
+
+  function handleConfirmThemeDialog() {
+    setChatThemePreference(chatThemeDraft);
+    setIsThemeDialogOpen(false);
+  }
+
+  function handlePreviewWallpaper(wallpaper: ChatWallpaperPreference) {
+    setChatWallpaperDraft(wallpaper);
+  }
+
+  function handleDiscardWallpaperPreview() {
+    setChatWallpaperDraft(chatWallpaperPreference);
+  }
+
+  function handleSaveChatSettings() {
+    setChatSettingsError("");
+    setChatSettingsStatus("");
+
+    startChatSettingsTransition(async () => {
+      try {
+        const updatedUser = await updateCurrentUser(session.token, {
+          ...createProfileForm(currentUser),
+          chatThemePreference,
+          chatWallpaperPreference: chatWallpaperDraft
+        });
+
+        setCurrentUser(updatedUser);
+        onSessionChange({
+          ...session,
+          user: updatedUser
+        });
+        setChatThemePreference(updatedUser.chatThemePreference ?? "system");
+        setChatWallpaperPreference(updatedUser.chatWallpaperPreference ?? "default");
+        setChatThemeDraft(updatedUser.chatThemePreference ?? "system");
+        setChatWallpaperDraft(updatedUser.chatWallpaperPreference ?? "default");
+        setChatSettingsStatus("Chat appearance updated.");
+      } catch (caughtError) {
+        setChatSettingsError(caughtError instanceof Error ? caughtError.message : "Unable to save chat settings.");
+      }
+    });
+  }
   function handleSaveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setProfileError("");
@@ -2077,9 +2258,9 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   }
 
   return (
-    <main className="workspace-shell">
+    <main className={`workspace-shell chat-theme-${appliedChatTheme} chat-wallpaper-${effectiveWallpaperPreference}`}>
       <section className={`workspace-frame ${activeConversation ? "mobile-chat-open" : "mobile-sidebar-open"}`}>
-        <aside className={`sidebar-shell ${sidebarView === "profile" ? "profile-open" : ""}`}>
+        <aside className={`sidebar-shell ${sidebarView === "profile" || sidebarView === "settings" ? "profile-open" : ""}`}>
           <SidebarRail
             currentUser={currentUser}
             sidebarView={sidebarView}
@@ -2089,14 +2270,72 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
             onShowRequests={handleShowRequests}
             onShowDiscover={handleShowDiscover}
             onShowProfile={() => openProfilePanel(false)}
-            onEditProfile={() => openProfilePanel(true)}
+            onShowSettings={openSettingsHome}
             onLogout={() => onSessionChange(null)}
           />
 
           <div className="sidebar">
-            {sidebarView !== "profile" ? (
+            {sidebarView === "profile" ? (
+              <ProfileSidebar
+                currentUser={currentUser}
+                isEditingProfile={isEditingProfile}
+                profileForm={profileForm}
+                profileError={profileError}
+                profileStatus={profileStatus}
+                isSavingProfile={isSavingProfile}
+                onShowPeople={handleShowFriends}
+                onStartEdit={() => setIsEditingProfile(true)}
+                onCancelEdit={handleCancelProfileEdit}
+                onLogout={() => onSessionChange(null)}
+                onProfileFieldChange={handleProfileFieldChange}
+                onProfileImageUpload={handleProfileImageUpload}
+                onSaveProfile={handleSaveProfile}
+              />
+            ) : sidebarView === "settings" ? (
+              settingsScreen === "profile" ? (
+                <ProfileSettingsPanel
+                  currentUser={currentUser}
+                  profileForm={profileForm}
+                  profileError={profileError}
+                  profileStatus={profileStatus}
+                  isSavingProfile={isSavingProfile}
+                  onBack={openSettingsHome}
+                  onProfileFieldChange={handleProfileFieldChange}
+                  onProfileImageUpload={handleProfileImageUpload}
+                  onSaveProfile={handleSaveProfile}
+                />
+              ) : settingsScreen === "chats" ? (
+                <ChatSettingsPanel
+                  savedThemePreference={chatThemePreference}
+                  draftThemePreference={chatThemeDraft}
+                  appliedTheme={appliedChatTheme}
+                  savedWallpaperPreference={chatWallpaperPreference}
+                  draftWallpaperPreference={chatWallpaperDraft}
+                  isThemeDialogOpen={isThemeDialogOpen}
+                  isSaving={isSavingChatSettings}
+                  error={chatSettingsError}
+                  status={chatSettingsStatus}
+                  onBack={openSettingsHome}
+                  onOpenThemeDialog={handleOpenThemeDialog}
+                  onCloseThemeDialog={handleCloseThemeDialog}
+                  onThemeDraftChange={setChatThemeDraft}
+                  onConfirmThemeDialog={handleConfirmThemeDialog}
+                  onPreviewWallpaper={handlePreviewWallpaper}
+                  onDiscardWallpaperPreview={handleDiscardWallpaperPreview}
+                  onSaveWallpaper={handleSaveChatSettings}
+                />
+              ) : (
+                <SettingsSidebar
+                  currentUser={currentUser}
+                  search={settingsSearch}
+                  onSearchChange={setSettingsSearch}
+                  onOpenProfileSettings={openSettingsProfile}
+                  onOpenChatSettings={openChatSettings}
+                />
+              )
+            ) : (
               <PeopleSidebar
-                mode={sidebarView}
+                mode={sidebarView as "friends" | "requests" | "discover"}
                 search={search}
                 notificationPermission={notificationPermission}
                 onSearchChange={setSearch}
@@ -2115,22 +2354,6 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
                 onDeclineFriendRequest={handleDeclineFriendRequest}
                 onSendFriendRequest={handleSendFriendRequest}
                 getFriendshipLabel={getFriendshipLabel}
-              />
-            ) : (
-              <ProfileSidebar
-                currentUser={currentUser}
-                isEditingProfile={isEditingProfile}
-                profileForm={profileForm}
-                profileError={profileError}
-                profileStatus={profileStatus}
-                isSavingProfile={isSavingProfile}
-                onShowPeople={handleShowFriends}
-                onStartEdit={() => setIsEditingProfile(true)}
-                onCancelEdit={handleCancelProfileEdit}
-                onLogout={() => onSessionChange(null)}
-                onProfileFieldChange={handleProfileFieldChange}
-                onProfileImageUpload={handleProfileImageUpload}
-                onSaveProfile={handleSaveProfile}
               />
             )}
           </div>
@@ -2309,6 +2532,17 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
 }
 
 export default ChatView;
+
+
+
+
+
+
+
+
+
+
+
 
 
 

@@ -158,6 +158,12 @@ namespace WhatsAppClone.API
                         BEGIN
                             IF COL_LENGTH('AspNetUsers', 'Bio') IS NULL
                                 ALTER TABLE [dbo].[AspNetUsers] ADD [Bio] nvarchar(max) NULL;
+
+                            IF COL_LENGTH('AspNetUsers', 'ChatThemePreference') IS NULL
+                                ALTER TABLE [dbo].[AspNetUsers] ADD [ChatThemePreference] nvarchar(32) NULL;
+
+                            IF COL_LENGTH('AspNetUsers', 'ChatWallpaperPreference') IS NULL
+                                ALTER TABLE [dbo].[AspNetUsers] ADD [ChatWallpaperPreference] nvarchar(32) NULL;
                         END
 
                         IF OBJECT_ID(N'[dbo].[FriendRequests]', 'U') IS NULL
@@ -216,4 +222,5 @@ namespace WhatsAppClone.API
         }
     }
 }
+
 

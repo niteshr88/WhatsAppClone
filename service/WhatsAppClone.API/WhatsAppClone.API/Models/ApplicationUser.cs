@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.Identity;
 
 namespace WhatsAppClone.API.Models
 {
@@ -7,5 +7,7 @@ namespace WhatsAppClone.API.Models
         public string DisplayName { get; set; } = string.Empty;
         public string? ProfileImageUrl { get; set; }
         public string? Bio { get; set; }
+        public string? ChatThemePreference { get; set; }
+        public string? ChatWallpaperPreference { get; set; }
     }
 }

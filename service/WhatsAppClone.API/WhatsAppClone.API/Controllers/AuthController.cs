@@ -1,4 +1,4 @@
-﻿using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using WhatsAppClone.API.Models;
@@ -59,7 +59,9 @@ namespace WhatsAppClone.API.Controllers
                     user.Email,
                     user.DisplayName,
                     user.ProfileImageUrl,
-                    user.Bio
+                    user.Bio,
+                    user.ChatThemePreference,
+                    user.ChatWallpaperPreference
                 }
             });
         }
@@ -128,3 +130,4 @@ namespace WhatsAppClone.API.Controllers
         }
     }
 }
+

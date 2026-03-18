@@ -3,14 +3,14 @@ import { initials } from "../../utils/chat";
 
 type SidebarRailProps = {
   currentUser: AuthUser;
-  sidebarView: "friends" | "requests" | "discover" | "profile";
+  sidebarView: "friends" | "requests" | "discover" | "profile" | "settings";
   requestCount: number;
   discoverCount: number;
   onShowFriends: () => void;
   onShowRequests: () => void;
   onShowDiscover: () => void;
   onShowProfile: () => void;
-  onEditProfile: () => void;
+  onShowSettings: () => void;
   onLogout: () => void;
 };
 
@@ -133,7 +133,7 @@ function SidebarRail({
   onShowRequests,
   onShowDiscover,
   onShowProfile,
-  onEditProfile,
+  onShowSettings,
   onLogout
 }: SidebarRailProps) {
   return (
@@ -175,7 +175,7 @@ function SidebarRail({
         </button>
       </div>
       <div className="sidebar-rail-group">
-        <button aria-label="Edit profile" className="rail-button" type="button" onClick={onEditProfile}>
+        <button aria-label="Settings" className={`rail-button ${sidebarView === "settings" ? "active" : ""}`} type="button" onClick={onShowSettings}>
           <RailSettingsIcon className="rail-icon" />
         </button>
         <button aria-label="Log out" className="rail-button" type="button" onClick={onLogout}>
@@ -194,3 +194,4 @@ function SidebarRail({
 }
 
 export default SidebarRail;
+

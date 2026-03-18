@@ -6,6 +6,8 @@ export type AuthUser = {
   displayName: string;
   profileImageUrl?: string | null;
   bio?: string | null;
+  chatThemePreference?: "system" | "light" | "dark" | null;
+  chatWallpaperPreference?: "default" | "mist" | "mint" | "lavender" | "sunset" | "midnight" | null;
   friendshipStatus?: FriendshipStatus;
   friendshipRequestId?: number | null;
 };
@@ -93,6 +95,8 @@ export type UpdateProfileRequest = {
   displayName: string;
   profileImageUrl?: string | null;
   bio?: string | null;
+  chatThemePreference?: "system" | "light" | "dark" | null;
+  chatWallpaperPreference?: "default" | "mist" | "mint" | "lavender" | "sunset" | "midnight" | null;
 };
 
 export type UpdateGroupSettingsRequest = {
