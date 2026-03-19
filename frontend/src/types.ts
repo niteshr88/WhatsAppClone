@@ -60,6 +60,11 @@ export type MessageReceipt = {
   readAt?: string | null;
 };
 
+export type MessagePage = {
+  items: Message[];
+  hasOlder: boolean;
+};
+
 export type LoginRequest = {
   email: string;
   password: string;

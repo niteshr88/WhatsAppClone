@@ -7,6 +7,7 @@ import type {
   ForgotPasswordResponse,
   LoginRequest,
   Message,
+  MessagePage,
   RegisterRequest,
   ResetPasswordRequest,
   Session,
@@ -158,8 +159,31 @@ export function deleteConversation(token: string, conversationId: number) {
   return request<void>(`/api/Conversations/${conversationId}`, "DELETE", token);
 }
 
-export function getMessages(token: string, conversationId: number) {
-  return request<Message[]>(`/api/Messages/conversation/${conversationId}`, "GET", token);
+export async function getMessages(token: string, conversationId: number, options?: { limit?: number; beforeMessageId?: number }) {
+  const searchParams = new URLSearchParams();
+
+  if (options?.limit) {
+    searchParams.set("limit", options.limit.toString());
+  }
+
+  if (options?.beforeMessageId) {
+    searchParams.set("beforeMessageId", options.beforeMessageId.toString());
+  }
+
+  const query = searchParams.size ? `?${searchParams.toString()}` : "";
+  const payload = await request<MessagePage | Message[]>(`/api/Messages/conversation/${conversationId}${query}`, "GET", token);
+
+  if (Array.isArray(payload)) {
+    return {
+      items: payload,
+      hasOlder: false
+    } satisfies MessagePage;
+  }
+
+  return {
+    items: Array.isArray(payload.items) ? payload.items : [],
+    hasOlder: Boolean(payload.hasOlder)
+  } satisfies MessagePage;
 }
 
 export function createMessage(token: string, conversationId: number, text: string, clientMessageId?: string) {

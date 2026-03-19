@@ -128,9 +128,17 @@ type CreateGroupFormState = {
   expiresUnit: GroupExpiryUnit;
 };
 
+type ConversationMessagePageState = {
+  initialized: boolean;
+  hasOlder: boolean;
+  isLoadingOlder: boolean;
+  oldestLoadedMessageId: number | null;
+};
+
 const NOTIFICATION_PROMPT_STORAGE_KEY = "pulsechat.notifications.prompted";
 const CHAT_THEME_STORAGE_KEY = "sandesaa.chat.theme";
 const CHAT_WALLPAPER_STORAGE_KEY = "sandesaa.chat.wallpaper";
+const MESSAGE_PAGE_SIZE = 40;
 
 function getPendingQueueStorageKey(userId: string) {
   return `pulsechat.pending.${userId}`;
@@ -264,6 +272,57 @@ function formatGroupExpiry(expiresAt?: string | null) {
   return `Expires in ${totalHours}h`;
 }
 
+function getOldestPersistedMessageId(messages: Message[]) {
+  for (const message of messages) {
+    if (message.id > 0) {
+      return message.id;
+    }
+  }
+
+  return null;
+}
+
+function createInitialMessagePageState(): ConversationMessagePageState {
+  return {
+    initialized: false,
+    hasOlder: false,
+    isLoadingOlder: false,
+    oldestLoadedMessageId: null
+  };
+}
+
+function mergeMessages(existing: Message[], incoming: Message[]) {
+  const merged = [...existing];
+
+  for (const nextMessage of incoming) {
+    const matchedIndex = merged.findIndex(
+      (message) =>
+        message.id === nextMessage.id ||
+        (!!nextMessage.clientMessageId && message.clientMessageId === nextMessage.clientMessageId)
+    );
+
+    if (matchedIndex >= 0) {
+      merged[matchedIndex] = {
+        ...merged[matchedIndex],
+        ...nextMessage
+      };
+      continue;
+    }
+
+    merged.push(nextMessage);
+  }
+
+  return merged.sort((left, right) => {
+    const timeDifference = new Date(left.sentAt).getTime() - new Date(right.sentAt).getTime();
+
+    if (timeDifference !== 0) {
+      return timeDifference;
+    }
+
+    return left.id - right.id;
+  });
+}
+
 function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [searchParams] = useSearchParams();
   const [currentUser, setCurrentUser] = useState<AuthUser>(session.user);
@@ -271,6 +330,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConversationId, setActiveConversationId] = useState<number | null>(null);
   const [messagesByConversation, setMessagesByConversation] = useState<MessagesByConversation>({});
+  const [messagePaginationByConversation, setMessagePaginationByConversation] = useState<Record<number, ConversationMessagePageState>>({});
   const [search, setSearch] = useState("");
   const [debouncedSearch, setDebouncedSearch] = useState("");
   const [draft, setDraft] = useState("");
@@ -294,9 +354,8 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   const [settingsSearch, setSettingsSearch] = useState("");
   const [chatThemePreference, setChatThemePreference] = useState<ChatThemePreference>(() => session.user.chatThemePreference ?? loadStoredChatThemePreference());
   const [chatWallpaperPreference, setChatWallpaperPreference] = useState<ChatWallpaperPreference>(() => session.user.chatWallpaperPreference ?? loadStoredChatWallpaperPreference());
-  const [chatThemeDraft, setChatThemeDraft] = useState<ChatThemePreference>(() => session.user.chatThemePreference ?? loadStoredChatThemePreference());
-  const [chatWallpaperDraft, setChatWallpaperDraft] = useState<ChatWallpaperPreference>(() => session.user.chatWallpaperPreference ?? loadStoredChatWallpaperPreference());
   const [isThemeDialogOpen, setIsThemeDialogOpen] = useState(false);
+  const [isWallpaperDialogOpen, setIsWallpaperDialogOpen] = useState(false);
   const [chatSettingsError, setChatSettingsError] = useState("");
   const [chatSettingsStatus, setChatSettingsStatus] = useState("");
   const [systemChatTheme, setSystemChatTheme] = useState<"light" | "dark">(() => {
@@ -327,7 +386,11 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   const connectionRef = useRef<HubConnection | null>(null);
   const joinedConversationIdsRef = useRef<Set<number>>(new Set());
   const messageStreamRef = useRef<HTMLDivElement | null>(null);
+  const pendingScrollRestoreRef = useRef<{ conversationId: number; previousScrollHeight: number } | null>(null);
+  const lastAutoScrolledSignatureRef = useRef<string>("");
   const conversationsRef = useRef<Conversation[]>([]);
+  const messagesByConversationRef = useRef<MessagesByConversation>(messagesByConversation);
+  const messagePaginationByConversationRef = useRef<Record<number, ConversationMessagePageState>>(messagePaginationByConversation);
   const pendingOutgoingQueueRef = useRef<PendingOutgoingTextMessage[]>(pendingOutgoingQueue);
   const pendingOutgoingMediaQueueRef = useRef<PendingOutgoingMediaMessage[]>(pendingOutgoingMediaQueue);
   const nextTempMessageIdRef = useRef(
@@ -406,6 +469,9 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     return lookup;
   }, [conversations, currentUser.id]);
   const messages = activeConversationId ? messagesByConversation[activeConversationId] ?? [] : [];
+  const activeMessagePagination = activeConversationId
+    ? messagePaginationByConversation[activeConversationId] ?? createInitialMessagePageState()
+    : createInitialMessagePageState();
   const activeTypingIndicator = useMemo(
     () => (activeConversationId ? typingByConversation[activeConversationId] ?? null : null),
     [activeConversationId, typingByConversation]
@@ -464,8 +530,8 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     activeGroupConversation &&
     (activeGroupConversation.canManage || activeGroupConversation.adminUserId === currentUser.id)
   );
-  const effectiveThemePreference = settingsScreen === "chats" ? chatThemeDraft : chatThemePreference;
-  const effectiveWallpaperPreference = settingsScreen === "chats" ? chatWallpaperDraft : chatWallpaperPreference;
+  const effectiveThemePreference = chatThemePreference;
+  const effectiveWallpaperPreference = chatWallpaperPreference;
   const appliedChatTheme = effectiveThemePreference === "system" ? systemChatTheme : effectiveThemePreference;
   const availableGroupContacts = useMemo(
     () =>
@@ -483,6 +549,14 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   useEffect(() => {
     conversationsRef.current = conversations;
   }, [conversations]);
+
+  useEffect(() => {
+    messagesByConversationRef.current = messagesByConversation;
+  }, [messagesByConversation]);
+
+  useEffect(() => {
+    messagePaginationByConversationRef.current = messagePaginationByConversation;
+  }, [messagePaginationByConversation]);
 
   useEffect(() => {
     pendingOutgoingQueueRef.current = pendingOutgoingQueue;
@@ -527,12 +601,8 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
 
   useEffect(() => {
     setProfileForm(createProfileForm(currentUser));
-    const nextThemePreference = currentUser.chatThemePreference ?? loadStoredChatThemePreference();
-    const nextWallpaperPreference = currentUser.chatWallpaperPreference ?? loadStoredChatWallpaperPreference();
-    setChatThemePreference(nextThemePreference);
-    setChatWallpaperPreference(nextWallpaperPreference);
-    setChatThemeDraft(nextThemePreference);
-    setChatWallpaperDraft(nextWallpaperPreference);
+    setChatThemePreference(currentUser.chatThemePreference ?? loadStoredChatThemePreference());
+    setChatWallpaperPreference(currentUser.chatWallpaperPreference ?? loadStoredChatWallpaperPreference());
   }, [currentUser]);
 
   useEffect(() => {
@@ -690,6 +760,17 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     deliveredAt: null,
     readAt: null
   }));
+
+  const getQueuedConversationMessages = useEffectEvent((conversationId: number) => {
+    const queuedMessages = pendingOutgoingQueueRef.current
+      .filter((queuedMessage) => queuedMessage.conversationId === conversationId)
+      .map((queuedMessage) => createPendingTextMessage(queuedMessage));
+    const queuedMediaMessages = pendingOutgoingMediaQueueRef.current
+      .filter((queuedMessage) => queuedMessage.conversationId === conversationId)
+      .map((queuedMessage) => createPendingMediaMessage(queuedMessage));
+
+    return [...queuedMessages, ...queuedMediaMessages];
+  });
 
   const mergeIncomingMessage = useEffectEvent((message: Message) => {
     const normalizedMessage: Message = {
@@ -1583,39 +1664,54 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     let disposed = false;
 
     async function loadConversationMessages() {
-        try {
-          const conversationMessages = await getMessages(session.token, conversationId);
-          const queuedMessages = pendingOutgoingQueueRef.current
-            .filter((queuedMessage) => queuedMessage.conversationId === conversationId)
-            .map((queuedMessage) => createPendingTextMessage(queuedMessage));
-          const queuedMediaMessages = pendingOutgoingMediaQueueRef.current
-            .filter((queuedMessage) => queuedMessage.conversationId === conversationId)
-            .map((queuedMessage) => createPendingMediaMessage(queuedMessage));
-          const mergedConversationMessages = [...conversationMessages];
+      const existingPageState = messagePaginationByConversationRef.current[conversationId];
+      const existingMessages = messagesByConversationRef.current[conversationId] ?? [];
 
-          for (const queuedMessage of queuedMessages) {
-            if (!mergedConversationMessages.some((message) => message.clientMessageId === queuedMessage.clientMessageId)) {
-              mergedConversationMessages.push(queuedMessage);
+      if (existingPageState?.initialized && existingMessages.length > 0) {
+        void acknowledgeConversationRead(conversationId, existingMessages);
+        return;
+      }
+
+      setMessagePaginationByConversation((current) => ({
+        ...current,
+        [conversationId]: {
+          ...(current[conversationId] ?? createInitialMessagePageState()),
+          initialized: false,
+          isLoadingOlder: false
+        }
+      }));
+
+      try {
+        const page = await getMessages(session.token, conversationId, { limit: MESSAGE_PAGE_SIZE });
+        const mergedConversationMessages = mergeMessages(page.items, getQueuedConversationMessages(conversationId));
+
+        if (!disposed) {
+          setMessagesByConversation((current) => ({
+            ...current,
+            [conversationId]: mergedConversationMessages
+          }));
+          setMessagePaginationByConversation((current) => ({
+            ...current,
+            [conversationId]: {
+              initialized: true,
+              hasOlder: page.hasOlder,
+              isLoadingOlder: false,
+              oldestLoadedMessageId: getOldestPersistedMessageId(mergedConversationMessages)
             }
-          }
+          }));
 
-          for (const queuedMessage of queuedMediaMessages) {
-            if (!mergedConversationMessages.some((message) => message.clientMessageId === queuedMessage.clientMessageId)) {
-              mergedConversationMessages.push(queuedMessage);
-            }
-          }
-
-          if (!disposed) {
-            setMessagesByConversation((current) => ({
-              ...current,
-              [conversationId]: mergedConversationMessages
-            }));
-
-            void acknowledgeConversationRead(conversationId, mergedConversationMessages);
-          }
-        } catch (caughtError) {
+          void acknowledgeConversationRead(conversationId, mergedConversationMessages);
+        }
+      } catch (caughtError) {
         if (!disposed) {
           setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to load messages.");
+          setMessagePaginationByConversation((current) => ({
+            ...current,
+            [conversationId]: {
+              ...(current[conversationId] ?? createInitialMessagePageState()),
+              isLoadingOlder: false
+            }
+          }));
         }
       }
     }
@@ -1634,7 +1730,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
 
     void syncConversationGroups();
     void retryPendingMessages();
-  }, [connectionState, conversations, retryPendingMessages]);
+  }, [connectionState, conversations]);
 
   useEffect(() => {
     const typingConversationId = outgoingTypingConversationIdRef.current;
@@ -1651,6 +1747,23 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       return;
     }
 
+    const scrollRestore = pendingScrollRestoreRef.current;
+
+    if (scrollRestore && scrollRestore.conversationId === activeConversationId) {
+      messageStream.scrollTop = messageStream.scrollHeight - scrollRestore.previousScrollHeight;
+      pendingScrollRestoreRef.current = null;
+      return;
+    }
+
+    const latestMessage = messages[messages.length - 1];
+    const nextSignature = `${activeConversationId ?? "none"}:${messages.length}:${latestMessage?.id ?? latestMessage?.clientMessageId ?? "none"}`;
+
+    if (lastAutoScrolledSignatureRef.current === nextSignature) {
+      return;
+    }
+
+    lastAutoScrolledSignatureRef.current = nextSignature;
+
     messageStream.scrollTo({
       top: messageStream.scrollHeight,
       behavior: "smooth"
@@ -1660,6 +1773,15 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   function removeConversationLocally(conversationId: number) {
     setConversations((current) => current.filter((conversation) => conversation.id !== conversationId));
     setMessagesByConversation((current) => {
+      if (!(conversationId in current)) {
+        return current;
+      }
+
+      const next = { ...current };
+      delete next[conversationId];
+      return next;
+    });
+    setMessagePaginationByConversation((current) => {
       if (!(conversationId in current)) {
         return current;
       }
@@ -2127,8 +2249,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     setChatSettingsError("");
     setChatSettingsStatus("");
     setIsThemeDialogOpen(false);
-    setChatThemeDraft(chatThemePreference);
-    setChatWallpaperDraft(chatWallpaperPreference);
+    setIsWallpaperDialogOpen(false);
   }
 
   function openSettingsProfile() {
@@ -2149,8 +2270,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
     setChatSettingsError("");
     setChatSettingsStatus("");
     setIsThemeDialogOpen(false);
-    setChatThemeDraft(chatThemePreference);
-    setChatWallpaperDraft(chatWallpaperPreference);
+    setIsWallpaperDialogOpen(false);
   }
 
   function handleProfileFieldChange(field: keyof UpdateProfileRequest, value: string) {
@@ -2187,29 +2307,92 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
   }
 
   function handleOpenThemeDialog() {
-    setChatThemeDraft(chatThemePreference);
     setIsThemeDialogOpen(true);
   }
 
   function handleCloseThemeDialog() {
-    setChatThemeDraft(chatThemePreference);
     setIsThemeDialogOpen(false);
   }
 
-  function handleConfirmThemeDialog() {
-    setChatThemePreference(chatThemeDraft);
-    setIsThemeDialogOpen(false);
+  function handleOpenWallpaperDialog() {
+    setIsWallpaperDialogOpen(true);
   }
 
-  function handlePreviewWallpaper(wallpaper: ChatWallpaperPreference) {
-    setChatWallpaperDraft(wallpaper);
+  function handleCloseWallpaperDialog() {
+    setIsWallpaperDialogOpen(false);
   }
 
-  function handleDiscardWallpaperPreview() {
-    setChatWallpaperDraft(chatWallpaperPreference);
+  function handleLoadOlderMessages() {
+    if (!activeConversationId) {
+      return;
+    }
+
+    const conversationId = activeConversationId;
+    const pageState = messagePaginationByConversationRef.current[conversationId] ?? createInitialMessagePageState();
+
+    if (pageState.isLoadingOlder || !pageState.hasOlder || !pageState.oldestLoadedMessageId) {
+      return;
+    }
+
+    const messageStream = messageStreamRef.current;
+
+    if (messageStream) {
+      pendingScrollRestoreRef.current = {
+        conversationId,
+        previousScrollHeight: messageStream.scrollHeight
+      };
+    }
+
+    setMessagePaginationByConversation((current) => ({
+      ...current,
+      [conversationId]: {
+        ...pageState,
+        isLoadingOlder: true
+      }
+    }));
+    setWorkspaceError("");
+
+    void (async () => {
+      try {
+        const page = await getMessages(session.token, conversationId, {
+          limit: MESSAGE_PAGE_SIZE,
+          beforeMessageId: pageState.oldestLoadedMessageId ?? undefined
+        });
+
+        setMessagesByConversation((current) => {
+          const existingMessages = current[conversationId] ?? [];
+          const mergedConversationMessages = mergeMessages(page.items, existingMessages);
+
+          setMessagePaginationByConversation((pagination) => ({
+            ...pagination,
+            [conversationId]: {
+              initialized: true,
+              hasOlder: page.hasOlder,
+              isLoadingOlder: false,
+              oldestLoadedMessageId: getOldestPersistedMessageId(mergedConversationMessages)
+            }
+          }));
+
+          return {
+            ...current,
+            [conversationId]: mergedConversationMessages
+          };
+        });
+      } catch (caughtError) {
+        pendingScrollRestoreRef.current = null;
+        setWorkspaceError(caughtError instanceof Error ? caughtError.message : "Unable to load older messages.");
+        setMessagePaginationByConversation((current) => ({
+          ...current,
+          [conversationId]: {
+            ...pageState,
+            isLoadingOlder: false
+          }
+        }));
+      }
+    })();
   }
 
-  function handleSaveChatSettings() {
+  function saveChatAppearance(nextThemePreference: ChatThemePreference, nextWallpaperPreference: ChatWallpaperPreference, successMessage: string) {
     setChatSettingsError("");
     setChatSettingsStatus("");
 
@@ -2217,8 +2400,8 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
       try {
         const updatedUser = await updateCurrentUser(session.token, {
           ...createProfileForm(currentUser),
-          chatThemePreference,
-          chatWallpaperPreference: chatWallpaperDraft
+          chatThemePreference: nextThemePreference,
+          chatWallpaperPreference: nextWallpaperPreference
         });
 
         setCurrentUser(updatedUser);
@@ -2228,13 +2411,23 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
         });
         setChatThemePreference(updatedUser.chatThemePreference ?? "system");
         setChatWallpaperPreference(updatedUser.chatWallpaperPreference ?? "default");
-        setChatThemeDraft(updatedUser.chatThemePreference ?? "system");
-        setChatWallpaperDraft(updatedUser.chatWallpaperPreference ?? "default");
-        setChatSettingsStatus("Chat appearance updated.");
+        setChatSettingsStatus(successMessage);
       } catch (caughtError) {
         setChatSettingsError(caughtError instanceof Error ? caughtError.message : "Unable to save chat settings.");
       }
     });
+  }
+
+  function handleApplyTheme(theme: ChatThemePreference) {
+    setIsThemeDialogOpen(false);
+    setChatThemePreference(theme);
+    saveChatAppearance(theme, chatWallpaperPreference, "Theme updated.");
+  }
+
+  function handleApplyWallpaper(wallpaper: ChatWallpaperPreference) {
+    setIsWallpaperDialogOpen(false);
+    setChatWallpaperPreference(wallpaper);
+    saveChatAppearance(chatThemePreference, wallpaper, "Wallpaper updated.");
   }
   function handleSaveProfile(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -2306,23 +2499,21 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
                 />
               ) : settingsScreen === "chats" ? (
                 <ChatSettingsPanel
-                  savedThemePreference={chatThemePreference}
-                  draftThemePreference={chatThemeDraft}
+                  themePreference={chatThemePreference}
                   appliedTheme={appliedChatTheme}
-                  savedWallpaperPreference={chatWallpaperPreference}
-                  draftWallpaperPreference={chatWallpaperDraft}
+                  wallpaperPreference={chatWallpaperPreference}
                   isThemeDialogOpen={isThemeDialogOpen}
+                  isWallpaperDialogOpen={isWallpaperDialogOpen}
                   isSaving={isSavingChatSettings}
                   error={chatSettingsError}
                   status={chatSettingsStatus}
                   onBack={openSettingsHome}
                   onOpenThemeDialog={handleOpenThemeDialog}
                   onCloseThemeDialog={handleCloseThemeDialog}
-                  onThemeDraftChange={setChatThemeDraft}
-                  onConfirmThemeDialog={handleConfirmThemeDialog}
-                  onPreviewWallpaper={handlePreviewWallpaper}
-                  onDiscardWallpaperPreview={handleDiscardWallpaperPreview}
-                  onSaveWallpaper={handleSaveChatSettings}
+                  onApplyTheme={handleApplyTheme}
+                  onOpenWallpaperDialog={handleOpenWallpaperDialog}
+                  onCloseWallpaperDialog={handleCloseWallpaperDialog}
+                  onApplyWallpaper={handleApplyWallpaper}
                 />
               ) : (
                 <SettingsSidebar
@@ -2365,6 +2556,8 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
           activeDirectContact={activeDirectContact}
           currentUser={currentUser}
           messages={messages}
+          hasOlderMessages={activeMessagePagination.hasOlder}
+          isLoadingOlderMessages={activeMessagePagination.isLoadingOlder}
           messageStreamRef={messageStreamRef}
           draft={draft}
           isSending={isSending}
@@ -2377,6 +2570,7 @@ function ChatView({ session, onSessionChange }: ChatViewProps) {
           onDeleteConversation={handleDeleteConversation}
           onOpenGroupSettings={openGroupSettingsModal}
           onRetryMessage={handleRetryMessage}
+          onLoadOlderMessages={handleLoadOlderMessages}
           onSendFriendRequest={handleSendFriendRequest}
           onAcceptFriendRequest={handleAcceptFriendRequest}
           onDeclineFriendRequest={handleDeclineFriendRequest}

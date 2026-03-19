@@ -77,7 +77,7 @@ function GroupSettingsModal({
           <div>
             <p className="eyebrow">Group settings</p>
             <h3 id="group-settings-title">{conversation.displayName}</h3>
-            <p className="group-settings-subtitle">{groupStatus} · {expiryText}</p>
+            <p className="group-settings-subtitle">{groupStatus} ï¿½ {expiryText}</p>
           </div>
           <button className="ghost-button" type="button" onClick={onClose}>
             Close

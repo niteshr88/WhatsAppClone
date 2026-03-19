@@ -38,7 +38,10 @@ namespace WhatsAppClone.API.Controllers
         }
 
         [HttpGet("conversation/{conversationId:int}")]
-        public async Task<ActionResult<IEnumerable<MessageDto>>> GetMessages(int conversationId)
+        public async Task<ActionResult<MessagePageDto>> GetMessages(
+            int conversationId,
+            [FromQuery] int limit = 40,
+            [FromQuery] int? beforeMessageId = null)
         {
             var currentUserId = User.FindFirstValue(ClaimTypes.NameIdentifier);
 
@@ -52,10 +55,16 @@ namespace WhatsAppClone.API.Controllers
                 return NotFound();
             }
 
-            var messages = await _context.Messages
+            limit = Math.Clamp(limit, 1, 100);
+
+            var messageQuery = _context.Messages
                 .AsNoTracking()
                 .Where(message => message.ConversationId == conversationId)
-                .OrderBy(message => message.SentAt)
+                .Where(message => !beforeMessageId.HasValue || message.Id < beforeMessageId.Value);
+
+            var rawMessages = await messageQuery
+                .OrderByDescending(message => message.Id)
+                .Take(limit + 1)
                 .Join(
                     _context.Users.AsNoTracking(),
                     message => message.SenderId,
@@ -80,7 +89,17 @@ namespace WhatsAppClone.API.Controllers
                     })
                 .ToListAsync();
 
-            return Ok(messages);
+            var hasOlder = rawMessages.Count > limit;
+            var items = rawMessages
+                .Take(limit)
+                .OrderBy(message => message.SentAt)
+                .ToList();
+
+            return Ok(new MessagePageDto
+            {
+                Items = items,
+                HasOlder = hasOlder
+            });
         }
 
         [HttpPost]

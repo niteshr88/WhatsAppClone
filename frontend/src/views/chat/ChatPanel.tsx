@@ -15,6 +15,8 @@ type ChatPanelProps = {
   activeDirectContact: AuthUser | null;
   currentUser: AuthUser;
   messages: Message[];
+  hasOlderMessages: boolean;
+  isLoadingOlderMessages: boolean;
   messageStreamRef: RefObject<HTMLDivElement | null>;
   draft: string;
   isSending: boolean;
@@ -27,6 +29,7 @@ type ChatPanelProps = {
   onDeleteConversation?: () => void | Promise<void>;
   onOpenGroupSettings?: () => void;
   onRetryMessage: (clientMessageId: string) => void | Promise<void>;
+  onLoadOlderMessages: () => void;
   onSendFriendRequest: (recipientId: string) => void | Promise<void>;
   onAcceptFriendRequest: (requestId: number) => void | Promise<void>;
   onDeclineFriendRequest: (requestId: number) => void | Promise<void>;
@@ -207,6 +210,8 @@ function ChatPanel({
   activeDirectContact,
   currentUser,
   messages,
+  hasOlderMessages,
+  isLoadingOlderMessages,
   messageStreamRef,
   draft,
   isSending,
@@ -219,6 +224,7 @@ function ChatPanel({
   onDeleteConversation,
   onOpenGroupSettings,
   onRetryMessage,
+  onLoadOlderMessages,
   onSendFriendRequest,
   onAcceptFriendRequest,
   onDeclineFriendRequest,
@@ -532,6 +538,18 @@ function ChatPanel({
 
       <div className="message-stream" ref={messageStreamRef}>
         {messageActionError ? <p className="status-banner error floating-status">{messageActionError}</p> : null}
+        {activeConversation && hasOlderMessages ? (
+          <div className="message-history-loader">
+            <button
+              className="message-history-button"
+              disabled={isLoadingOlderMessages}
+              type="button"
+              onClick={onLoadOlderMessages}
+            >
+              {isLoadingOlderMessages ? "Loading older messages..." : "Load older messages"}
+            </button>
+          </div>
+        ) : null}
         {activeConversation ? (
           messages.length ? (
             messages.map((message) => {
